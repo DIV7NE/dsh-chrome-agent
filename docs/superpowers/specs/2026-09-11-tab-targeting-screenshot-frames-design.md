@@ -139,13 +139,23 @@ At most **12 frames** are read; the rest are reported as
 
 ### Ref encoding
 
-Frames are keyed `f0` (main), `f1`, `f2`… in tree order. A ref from a child frame
-is written `f1:7`.
+Frames are keyed `f0` (main), `f1`, `f2`… in tree order, and the key travels as
+its **own optional argument** rather than folded into the ref.
 
-- **A bare integer ref still means the main frame.** Existing snapshots, prompts
-  and tests keep working.
-- Ref resolution takes the frame key into account, so a ref drawn from a frame is
-  resolved in that frame's context.
+The main frame keeps writing `[ref=7] button "Submit"`. A child frame writes
+`[ref=7 frame=f1] button "Submit"`. `ref` stays an **integer**; `frame` is the
+new optional string argument, accepted by `chrome_click`, `chrome_hover`,
+`chrome_type`, `chrome_scroll` and `chrome_upload`, and as `fromFrame`/`toFrame`
+on `chrome_drag`.
+
+- **Existing calls are untouched.** No `frame` means the main frame, so every
+  current snapshot line, prompt and test keeps working.
+- Why not `f1:7` as a string ref: the page-side resolver
+  (`pointExpressionFor`, `extension/service-worker.js:456`) and every host tool
+  schema type `ref` as an integer. Folding the frame into the ref would mean
+  widening `ref` to `string|number`, losing its validation and adding a parse to
+  every ref-using tool. A sibling argument costs one optional field and keeps the
+  existing type.
 
 ### Clicking a ref that lives inside a frame
 
@@ -167,7 +177,7 @@ is worse than not clicking.
 ### find fan-out
 
 `chrome_find` runs in every frame context and merges the results; matches from a
-child frame are labelled with their frame key. Nobody hunts for text and wants it
+child frame are labelled `[f1]` so a hit's location is answerable. Nobody hunts for text and wants it
 only if it happens to be in the main document.
 
 `chrome_page_text` **stays main-frame only** by decision: its job is reading the
@@ -206,8 +216,10 @@ establishes, once:
 (permitted in MV3 service workers that are not modules) and by the node test
 directly, so there is one implementation and no `chrome.*` dependency:
 
-- `encodeRef` / `parseRef`: bare `7` is the main frame; `f1:7` round-trips; a
-  malformed key is rejected.
+- `flattenFrameTree`: tree order, main frame first, each child carrying its
+  parent's key, and the total reported even when the list is capped.
+- `normaliseFrameKey`: absent, `''`, `null` and `f0` all mean the main frame;
+  `f1` and `f12` pass; `1`, `fx` and `f0a` are rejected.
 - the quality ladder: given an oversize PNG it picks the first JPEG that fits, and
   the smallest when none fits.
 - the confinement predicate: an agent-group tab passes, a foreign tab is refused,
