@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "DSH Chrome Agent",
+  "version": "0.1.0",
+  "description": "Connects your real, logged-in Chrome to DeepSeek Harness so its agent can read and drive the tabs you already have open.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApbeP6/mjVhlNg3yyIUPO2Y6whmWVUzSZid84ehqXkScIGUBfZiGZ3i3nSFEu7COJkpo7TtvuhDmAiEzZIbmBha4csAHg7If8w7JEUK8KE7adw953sfbcgEJEF1P5HwNDLrq7WHgCphEMK3bx1ppTap9qv+ATRGnFAbLdcEhfi0NXGUsETVC2uPfX5qIeCLUXCXajUhkYQyCVksUWlwRXEXFw76MxigriFVC0Dy+Vn9y8+EguUfRr0rHqPkqPXwtjcf8/Vh7L3lowXajJV08lzFY7qLpl0iKkyDnLsRNsjA3xHFNvL5e+c4GalaSjzcYNq8zP6Mr6qNdUYIsfIoGMzwIDAQAB",
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "alarms",
+    "activeTab"
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "DSH Chrome Agent"
+  }
+}

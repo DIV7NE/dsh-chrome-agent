@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DSH Chrome Agent</title>
+  <style>
+    body { font: 13px/1.5 system-ui, sans-serif; margin: 24px; max-width: 460px; }
+    h1 { font-size: 15px; margin: 0 0 4px; }
+    p { color: #555; margin: 0 0 16px; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+    input { width: 100px; padding: 4px 6px; font: inherit; }
+    button { margin-left: 8px; padding: 4px 10px; font: inherit; cursor: pointer; }
+    #state { margin-top: 14px; padding: 8px 10px; border-radius: 6px; background: #f2f2f2; }
+    .ok { background: #e6f4ea !important; }
+    .bad { background: #fce8e6 !important; }
+    code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>DSH Chrome Agent</h1>
+  <p>Connects this Chrome to the DeepSeek Harness server so its agent can read and drive your tabs.</p>
+  <label for="port">DSH web port</label>
+  <input id="port" type="number" min="1" max="65535" />
+  <button id="save" type="button">Save &amp; reconnect</button>
+  <div id="state">…</div>
+  <p style="margin-top:16px">The extension id this build expects is <code id="id"></code>. The server only accepts that id, so a copy of this folder keeps working as long as the pinned key is unchanged.</p>
+  <script src="options.js"></script>
+</body>
+</html>

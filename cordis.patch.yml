@@ -1,0 +1,13 @@
+# dsh-chrome-agent bundle patch
+#
+# Installed through the official CLI:
+#
+#   dsh plugin --profile web add <this package>
+#
+# The plugin claims the /chrome-agent/bridge WebSocket route. Nothing else is
+# required from the profile: the companion Chrome extension is loaded by hand
+# (chrome://extensions -> Load unpacked -> this package's extension/ folder).
+
+- insert:
+    - id: chrome-agent
+      name: 'dsh-chrome-agent'
