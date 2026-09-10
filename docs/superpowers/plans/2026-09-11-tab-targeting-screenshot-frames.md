@@ -81,24 +81,32 @@ const {
   sumFrameOffsets,
 } = globalThis.DSH_PURE
 
-/** A frame tree shaped like Page.getFrameTree's. */
-function tree(...childLists) {
-  const node = (id, children) => ({ frame: { id, url: 'https://x/' + id }, childFrames: children })
-  return node('root', childLists.map((kids, i) => node('c' + i, kids)))
-}
+/** A frame tree node shaped like Page.getFrameTree's. A leaf omits childFrames. */
+const frame = (id, childFrames) => (childFrames === undefined
+  ? { frame: { id, url: 'https://x/' + id } }
+  : { frame: { id, url: 'https://x/' + id }, childFrames })
+
+// root
+//   c0
+//   c1
+//     g0
+//     g1
+const sample = () => frame('root', [frame('c0'), frame('c1', [frame('g0'), frame('g1')])])
 
 test('a frame tree flattens main-first with parent keys', () => {
-  const flat = flattenFrameTree(tree(['g0', 'g1']), FRAME_LIMIT)
-  assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1', 'f2', 'f3'])
-  assert.deepEqual(flat.frames.map(f => f.parentKey), [null, 'f0', 'f0', 'f1'])
-  assert.equal(flat.total, 4)
+  const flat = flattenFrameTree(sample(), FRAME_LIMIT)
+  assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1', 'f2', 'f3', 'f4'])
+  assert.deepEqual(flat.frames.map(f => f.parentKey), [null, 'f0', 'f0', 'f2', 'f2'])
+  assert.deepEqual(flat.frames.map(f => f.frameId), ['root', 'c0', 'c1', 'g0', 'g1'])
+  assert.equal(flat.total, 5)
 })
 
 test('flattening caps the list but still counts every frame', () => {
-  const flat = flattenFrameTree(tree(['g0', 'g1']), 2)
+  const flat = flattenFrameTree(sample(), 2)
   assert.equal(flat.frames.length, 2)
-  assert.equal(flat.total, 4)
-  // Keys are assigned before the cap, so a returned key always means the same frame.
+  assert.equal(flat.total, 5)
+  // Keys are assigned before the cap, so a returned key always means the same
+  // frame — f2 still names c1 even though it is not in the list.
   assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1'])
 })
 
