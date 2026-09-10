@@ -45,6 +45,17 @@ globalThis.WebSocket = class {
 }
 globalThis.WebSocket.OPEN = 1
 
+// The worker is a classic MV3 service worker, so it loads pure.js with
+// importScripts. self has to be the global, because that is where pure.js
+// publishes DSH_PURE; and the shim has to really evaluate the script, because a
+// no-op would leave self.DSH_PURE undefined and the worker would die on the
+// missing constants instead of exercising what this probe is for. A worker's
+// importScripts resolves against its own directory, hence extension/ under ROOT.
+globalThis.self = globalThis
+globalThis.importScripts = (name) => {
+  new Function(readFileSync(ROOT + '/extension/' + name, 'utf8'))()
+}
+
 // --- execute the worker ---
 try {
   const source = readFileSync(ROOT + '/extension/service-worker.js', 'utf8')
