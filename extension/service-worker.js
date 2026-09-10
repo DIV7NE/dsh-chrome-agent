@@ -11,6 +11,17 @@
  * maintained rather than re-established per command. An alarm is the belt to
  * that brace — it retries when the socket drops or the worker was evicted.
  */
+importScripts('pure.js');
+
+/** The browser-free helpers, shared with the node test. */
+const PURE = self.DSH_PURE;
+const FRAME_LIMIT = PURE.FRAME_LIMIT;
+const SCREENSHOT_BASE64_LIMIT = PURE.SCREENSHOT_BASE64_LIMIT;
+const flattenFrameTree = PURE.flattenFrameTree;
+const normaliseFrameKey = PURE.normaliseFrameKey;
+const nextJpegQuality = PURE.nextJpegQuality;
+const isTabAllowed = PURE.isTabAllowed;
+const sumFrameOffsets = PURE.sumFrameOffsets;
 
 const DEFAULT_PORT = 3080;
 const PROTOCOL_VERSION = 1;
