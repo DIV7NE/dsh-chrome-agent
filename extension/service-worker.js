@@ -1527,20 +1527,64 @@ const COMMANDS = {
     // the one point guaranteed to be over the document.
     const centre = await evaluate(tabId, 'JSON.stringify({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) })');
     const point = JSON.parse(String(centre));
-    try {
-      // Chrome only answers wheel input when the compositor is actually
-      // rendering the tab; on a background tab the call never acks and would
-      // cost the caller its whole timeout. Bounded, so falling back is cheap.
-      await withTimeout(cdp(tabId, 'Input.dispatchMouseEvent', {
-        type: 'mouseWheel', x: point.x, y: point.y, deltaX: deltaX, deltaY: deltaY,
-        button: 'none', buttons: 0, modifiers: 0,
-      }), 1500);
-      return { scrolled: 'wheel ' + deltaX + ',' + deltaY };
-    } catch (error) {
-      // A hidden tab gets no wheel, so scroll it directly instead of moving the
-      // user's view to the tab.
-      await evaluate(tabId, scrollByExpression(deltaX, deltaY));
-      return { scrolled: 'scripted ' + deltaX + ',' + deltaY };
+    // Chrome only answers wheel input when the compositor is actually rendering
+    // the tab, and a tab nobody is showing never acks — the call just sits
+    // there. Ask which case this is instead of paying a timeout to find out.
+    // Measured, same tab and same call: hidden, 1515ms spent waiting for a wheel
+    // that never acked and 0 pixels scrolled; visible, 3-8ms. The bound stays as
+    // a net for a renderer that is compositing and still not answering, and it
+    // is short because a wheel that works acks in single-digit milliseconds.
+    if (await evaluate(tabId, 'document.visibilityState === "visible"')) {
+      try {
+        await withTimeout(cdp(tabId, 'Input.dispatchMouseEvent', {
+          type: 'mouseWheel', x: point.x, y: point.y, deltaX: deltaX, deltaY: deltaY,
+          button: 'none', buttons: 0, modifiers: 0,
+        }), 250);
+        return { scrolled: 'wheel ' + deltaX + ',' + deltaY };
+      } catch (error) {
+        /* compositing but silent — fall through and scroll it directly */
+      }
+    }
+    // A hidden tab gets no wheel, so scroll it directly instead of moving the
+    // user's view to the tab.
+    await evaluate(tabId, scrollByExpression(deltaX, deltaY));
+    return { scrolled: 'scripted ' + deltaX + ',' + deltaY };
+  },
+
+  /**
+   * Wait until an expression turns truthy, rather than for a guessed number of
+   * milliseconds.
+   *
+   * A fixed sleep has to cover the slowest case, so it is either too short and
+   * flaky or too long and wasted; this returns the moment the page is ready.
+   * The first check runs without any sleep at all, because the condition is
+   * often already true by the time the model asks — a wait that has already
+   * been satisfied must not cost a poll interval. Later checks back off from
+   * 25ms to 250ms, so a fast condition is caught quickly without hammering a
+   * page that is going to take a while.
+   */
+  async waitFor(params) {
+    const tabId = await resolveTabId(params.tabId);
+    const expression = typeof params.expression === 'string' ? params.expression : '';
+    if (expression === '') throw new Error('chrome_wait_for needs an expression to wait on');
+    const asked = Number(params.timeout);
+    const timeout = Number.isFinite(asked) ? Math.max(0, Math.min(30000, Math.round(asked))) : 5000;
+    const frameKey = normaliseFrameKey(params.frame);
+    const started = Date.now();
+    let checks = 0;
+    let interval = 25;
+    for (;;) {
+      checks += 1;
+      const value = await evaluateInFrame(tabId, frameKey, expression);
+      if (value) return { matched: true, waited: Date.now() - started, checks: checks };
+      const elapsed = Date.now() - started;
+      if (elapsed >= timeout) {
+        throw new Error('chrome_wait_for gave up after ' + elapsed + 'ms and ' + checks
+          + ' check(s); the expression last evaluated to '
+          + JSON.stringify(value === undefined ? null : value));
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(interval, timeout - elapsed)));
+      interval = Math.min(Math.round(interval * 1.5), 250);
     }
   },
 

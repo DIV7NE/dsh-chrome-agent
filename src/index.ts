@@ -225,6 +225,7 @@ export const BATCHABLE_TOOLS: ReadonlySet<string> = new Set([
   'chrome_type',
   'chrome_key',
   'chrome_wait',
+  'chrome_wait_for',
   'chrome_eval',
   'chrome_page_text',
   'chrome_find',
@@ -749,6 +750,38 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     execute: async (args: { ms: number }, exec) => {
       exec.signal.throwIfAborted()
       return { waited: await waitFor(args.ms) }
+    },
+  }))
+
+  register(defineTool({
+    name: 'chrome_wait_for',
+    description:
+      'Wait until a JavaScript expression in the page turns truthy, instead of sleeping for a guessed time. '
+      + 'Prefer this over chrome_wait: a fixed sleep must cover the slowest case, so it is either too short and flaky '
+      + 'or too long and wasted, while this returns the moment the page is ready. The first check runs immediately, '
+      + 'so a condition that already holds costs one round trip. Throws when the timeout elapses, naming the last value.',
+    parameters: {
+      expression: { type: 'string', required: true, description: 'A JavaScript expression that is truthy once the page is ready, e.g. !!document.querySelector(".results").' },
+      timeout: { type: 'integer', description: 'Give up after this many milliseconds (default 5000, max 30000).' },
+      frame: { type: 'string', description: 'Frame key from chrome_snapshot, when the condition is inside a child frame.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          matched: { type: 'boolean', required: true },
+          waited: { type: 'integer', required: true },
+          checks: { type: 'integer', required: true },
+        },
+      },
+      render: textRender<{ matched: boolean; waited: number; checks: number }>(
+        v => 'Condition met after ' + v.waited + 'ms (' + v.checks + ' check' + (v.checks === 1 ? '' : 's') + ').'),
+    },
+    execute: async (args: { expression: string; timeout?: number; frame?: string; tabId?: number }, exec) => {
+      exec.signal.throwIfAborted()
+      return bridge.call('waitFor', args)
     },
   }))
 
