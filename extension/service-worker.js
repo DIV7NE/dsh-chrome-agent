@@ -1560,8 +1560,13 @@ const COMMANDS = {
    * The first check runs without any sleep at all, because the condition is
    * often already true by the time the model asks — a wait that has already
    * been satisfied must not cost a poll interval. Later checks back off from
-   * 25ms to 250ms, so a fast condition is caught quickly without hammering a
-   * page that is going to take a while.
+   * 25ms to 100ms, so a fast condition is caught quickly without hammering a
+   * page that is going to take a while. That ceiling is the overshoot on a
+   * transition, which is all a poller can ever be late by: measured, a condition
+   * that came true at 600ms was reported at 833ms behind a 250ms ceiling,
+   * because the ladder had grown to the ceiling by then and slept a whole one
+   * before looking again. A check costs about 2ms, so lowering the ceiling buys
+   * less overshoot for evaluations that are still cheap.
    */
   async waitFor(params) {
     const tabId = await resolveTabId(params.tabId);
@@ -1584,7 +1589,7 @@ const COMMANDS = {
           + JSON.stringify(value === undefined ? null : value));
       }
       await new Promise(resolve => setTimeout(resolve, Math.min(interval, timeout - elapsed)));
-      interval = Math.min(Math.round(interval * 1.5), 250);
+      interval = Math.min(Math.round(interval * 1.5), 100);
     }
   },
 
