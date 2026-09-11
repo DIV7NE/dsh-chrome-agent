@@ -352,12 +352,13 @@ try {
   // scroll: bring a ref into view
   const capSnap = await call('snapshot', { tabId: cap.tabId });
   const boxRef = /\[ref=(\d+)\] (?:div|button)?\s*"box"/i.exec(capSnap.snapshot);
+  // A real assertion that always runs: the probe div is interactive (role=button),
+  // so a snapshot that does not list it is a broken snapshot, not a branch.
+  check('snapshot exposes a ref for the probe div', boxRef !== null, capSnap.snapshot.slice(0, 300));
   if (boxRef) {
     await call('scroll', { ref: Number(boxRef[1]), tabId: cap.tabId });
     const inView = await call('eval', { tabId: cap.tabId, expression: '(function () { var el = document.getElementById("box"); if (!el) return null; var r = el.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; })()' });
     check('scrolling to a ref brings it into view', String(inView.result) === 'true', inView);
-  } else {
-    check('snapshot exposes a ref for the probe div', false, capSnap.snapshot.slice(0, 300));
   }
 
   // Content inside a frame is invisible to a main-frame-only snapshot.

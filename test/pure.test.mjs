@@ -21,6 +21,7 @@ const {
   nextJpegQuality,
   chooseJpegAttempt,
   isTabAllowed,
+  pointInViewport,
   sumFrameOffsets,
 } = globalThis.DSH_PURE
 
@@ -144,6 +145,21 @@ test('confinement admits only the agent group when it is on', () => {
   // An ungrouped tab, and a session with no group yet, are both refused.
   assert.equal(isTabAllowed(-1, 7, true), false)
   assert.equal(isTabAllowed(7, null, true), false)
+})
+
+test('a point outside the viewport is refused, an edge point is inside', () => {
+  assert.equal(pointInViewport(10, 10, 100, 100), true)
+  // Exactly on each edge is inside; anything past it is not.
+  assert.equal(pointInViewport(0, 0, 100, 100), true)
+  assert.equal(pointInViewport(100, 100, 100, 100), true)
+  assert.equal(pointInViewport(-1, 10, 100, 100), false)
+  assert.equal(pointInViewport(10, -1, 100, 100), false)
+  assert.equal(pointInViewport(101, 10, 100, 100), false)
+  assert.equal(pointInViewport(10, 101, 100, 100), false)
+  // A non-finite or non-numeric input cannot be shown to be inside.
+  assert.equal(pointInViewport(NaN, 10, 100, 100), false)
+  assert.equal(pointInViewport(undefined, 10, 100, 100), false)
+  assert.equal(pointInViewport(10, 10, undefined, 100), false)
 })
 
 test('frame offsets sum up the chain', () => {

@@ -127,6 +127,25 @@
   }
 
   /**
+   * Whether a point about to be dispatched lies inside a viewport.
+   *
+   * Mouse input dispatched outside the viewport is silently dropped, so this is
+   * the guard that turns "clicked" into a lie. A point exactly on the edge is
+   * inside; only genuinely outside points fail.
+   *
+   * @param x - the point's horizontal coordinate.
+   * @param y - the point's vertical coordinate.
+   * @param width - the viewport's width.
+   * @param height - the viewport's height.
+   */
+  function pointInViewport(x, y, width, height) {
+    if (typeof x !== 'number' || typeof y !== 'number') return false;
+    if (typeof width !== 'number' || typeof height !== 'number') return false;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(width) || !isFinite(height)) return false;
+    return x >= 0 && y >= 0 && x <= width && y <= height;
+  }
+
+  /**
    * Sum a frame chain's offsets.
    *
    * Each entry is a CDP box model's border quad — eight numbers, top-left first —
@@ -159,6 +178,7 @@
     nextJpegQuality: nextJpegQuality,
     chooseJpegAttempt: chooseJpegAttempt,
     isTabAllowed: isTabAllowed,
+    pointInViewport: pointInViewport,
     sumFrameOffsets: sumFrameOffsets,
   };
 })(typeof self !== 'undefined' ? self : globalThis);

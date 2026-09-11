@@ -22,6 +22,7 @@ const normaliseFrameKey = PURE.normaliseFrameKey;
 const nextJpegQuality = PURE.nextJpegQuality;
 const chooseJpegAttempt = PURE.chooseJpegAttempt;
 const isTabAllowed = PURE.isTabAllowed;
+const pointInViewport = PURE.pointInViewport;
 const sumFrameOffsets = PURE.sumFrameOffsets;
 
 const DEFAULT_PORT = 3080;
@@ -162,6 +163,10 @@ async function loadCurrentTabId() {
       if (currentTabLoaded) return;
       currentTabId = storedId;
     } catch (error) {
+      // This catch is part of the same read: a rememberTab can land during the
+      // chrome.tabs.get await above, and its newer claim must not be cleared
+      // just because the stored tab turned out to be gone.
+      if (currentTabLoaded) return;
       currentTabId = null;
       chrome.storage.session.remove(CURRENT_TAB_KEY).catch(() => {});
     }
@@ -697,6 +702,30 @@ async function evaluateInFrame(tabId, frameKey, expression) {
   const found = await frameFor(tabId, frameKey);
   const contextId = await frameContext(tabId, found.frame.frameId);
   return evaluateIn(tabId, contextId, expression);
+}
+
+
+/**
+ * Refuse to dispatch input at a point outside the tab's viewport.
+ *
+ * CDP accepts any coordinate, but a mouse event outside the viewport reaches
+ * nothing, so a command that returned success would be lying: the agent would
+ * believe it acted. Called with every point about to be dispatched, however it
+ * was obtained (resolved ref, frame offset or explicit coordinates), before the
+ * view is moved. A point exactly on the edge is inside.
+ */
+async function assertInViewport(tabId, points) {
+  const size = await evaluate(tabId, '({ width: window.innerWidth, height: window.innerHeight })');
+  const width = size ? size.width : null;
+  const height = size ? size.height : null;
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (pointInViewport(point.x, point.y, width, height)) continue;
+    throw new Error('target ' + (point.label ? JSON.stringify(point.label) + ' ' : '')
+      + 'at ' + Math.round(point.x) + ',' + Math.round(point.y) + ' is outside the viewport '
+      + '(' + Math.round(width) + 'x' + Math.round(height) + '), so input there would be dropped — '
+      + 'scroll it into view first, or pass coordinates inside the viewport');
+  }
 }
 
 /**
@@ -1251,7 +1280,7 @@ const COMMANDS = {
           ? await evaluate(tabId, SNAPSHOT_EXPRESSION)
           : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), SNAPSHOT_EXPRESSION);
         if (typeof raw !== 'string') {
-          unread.push(frame.key);
+          unread.push(frame.key + ': the snapshot returned no value');
           continue;
         }
         parsed = JSON.parse(raw);
@@ -1319,6 +1348,8 @@ const COMMANDS = {
     const held = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
     const clicks = params.clicks === 3 ? 3 : params.clicks === 2 ? 2 : 1;
     const at = { x: x, y: y, modifiers: 0, button: button };
+    // Validate before ensureVisible: a refused click must not move the user's view.
+    await assertInViewport(tabId, [{ x: x, y: y, label: label }]);
     // Mouse input reaches no hidden tab; see ensureVisible. After the target is
     // resolved and validated, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
@@ -1335,6 +1366,7 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const point = await resolvePoint(tabId, params, '');
     if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
+    await assertInViewport(tabId, [{ x: point.x, y: point.y, label: point.label }]);
     // Mouse input reaches no hidden tab; see ensureVisible. After the target is
     // resolved, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
@@ -1352,6 +1384,12 @@ const COMMANDS = {
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
+    // Both ends, before the view moves: an interpolated path between two in-view
+    // points is itself in view, so only the ends need checking.
+    await assertInViewport(tabId, [
+      { x: start.x, y: start.y, label: start.label },
+      { x: end.x, y: end.y, label: end.label },
+    ]);
     // Mouse input reaches no hidden tab; see ensureVisible. After both ends are
     // resolved and validated, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
@@ -1436,12 +1474,14 @@ const COMMANDS = {
           ? await evaluate(tabId, findExpression(needle))
           : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), findExpression(needle));
         if (typeof raw !== 'string') {
-          unread.push(frame.key);
+          unread.push(frame.key + ': the search returned no value');
           continue;
         }
         parsed = JSON.parse(raw);
       } catch (error) {
-        unread.push(frame.key);
+        // Same reasoning as the snapshot: a systemic CDP failure or a detach
+        // must not read as one frame quietly having no matches.
+        unread.push(frame.key + ': ' + describe(error));
         continue;
       }
       count += Number(parsed.count) || 0;
