@@ -99,7 +99,9 @@ renderer to capture.
 Sending input is the exception. Chrome routes neither keys nor mouse events to a
 tab that is not visible, so `chrome_key`, `chrome_click`, `chrome_hover` and
 `chrome_drag` bring the agent's tab to the front for the moment they act, which
-moves your view there. `chrome_scroll` does not move your view: scrolling falls
+moves your view there — but only when nothing is being composited for that tab:
+a window that is merely behind another app is left exactly where it is, and the
+click still lands. `chrome_scroll` does not move your view: scrolling falls
 back to a scripted scroll. `chrome_type` does not either, unless you set
 `submit` — the Enter it then presses is a key event, and keys need a visible tab.
 
@@ -128,6 +130,18 @@ reaches the page. Measured: `Control+a` on a background tab produced **zero**
 a frame ref each fired nothing on a background tab, while the same click fired on
 a visible one. There is no CDP flag that changes this, so `chrome_key`,
 `chrome_click`, `chrome_hover` and `chrome_drag` bring their tab forward first.
+
+Visible means the tab **and** its window. A tab stays active inside a window that
+is behind another app, and Chrome composites nothing for a window nobody is
+showing, so `document.visibilityState` reads `hidden` there too — and that case
+is not merely a dropped event: every mouse event stalls for about five seconds
+before it lands. Measured on one tab, same click: window behind another app,
+5007ms; window in front, 66ms. A key event skipped the stall entirely at 4ms,
+which points at the compositor's hit test rather than at input as a whole. Focus
+is not what input needs, though: with the window visible but behind another app
+the click landed in 331ms without the window ever being focused, so focus is
+taken only when the page reports it is not visible.
+
 Text entry is unaffected, because `Input.insertText` takes a different path and
 works on a background tab; scrolling falls back to a scripted `window.scrollBy`,
 so it too stays in the background. A `chrome_type` with `submit` set is the
