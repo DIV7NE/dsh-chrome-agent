@@ -792,6 +792,27 @@ async function resolvePoint(tabId, params, prefix) {
   return { x: placed.x, y: placed.y, label: point.label };
 }
 
+/**
+ * Resolve a target on the page as it will be when the input is dispatched.
+ *
+ * `resolvePoint` reads the page while the tab may still be in the background. A
+ * background tab that has had `scrollIntoView` applied but has never been shown
+ * has not committed that scroll, so when `ensureVisible` brings it forward the
+ * page settles back to its committed offset and a point resolved before the
+ * activation is stale. Measured on the frame fixture: the frame was scrolled
+ * into view, then the page snapped 900px the other way before the mouse events
+ * went out, and the click reported success without landing. Re-reading after
+ * activation is what makes the dispatched point match the page.
+ *
+ * The caller resolves and validates once before activation as well, because a
+ * command that is going to be refused must not move the user's view.
+ */
+async function resolveVisiblePoint(tabId, params, prefix) {
+  const point = await resolvePoint(tabId, params, prefix);
+  if (point) await assertInViewport(tabId, [{ x: point.x, y: point.y, label: point.label }]);
+  return point;
+}
+
 /** Page-side focus resolver for chrome_type. */
 function focusExpression(params) {
   const selector = typeof params.selector === 'string' ? params.selector : null;
@@ -1397,6 +1418,17 @@ const COMMANDS = {
     // Mouse input reaches no hidden tab; see ensureVisible. After the target is
     // resolved and validated, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
+    // Activation can settle the page back to its committed scroll, moving a
+    // target that was resolved while the tab was still hidden. Re-read it now so
+    // the dispatched point matches the page at dispatch time; see
+    // resolveVisiblePoint.
+    const placed = await resolveVisiblePoint(tabId, params, '');
+    if (!placed) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
+    x = placed.x;
+    y = placed.y;
+    label = placed.label;
+    at.x = x;
+    at.y = y;
     await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved', buttons: 0, force: 0 }, at, { button: 'none' }));
     for (let count = 1; count <= clicks; count += 1) {
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: held, clickCount: count, force: 0.5 }, at));
@@ -1414,17 +1446,20 @@ const COMMANDS = {
     // Mouse input reaches no hidden tab; see ensureVisible. After the target is
     // resolved, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
+    // Re-read after activation: see resolveVisiblePoint.
+    const placed = await resolveVisiblePoint(tabId, params, '');
+    if (!placed) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
     await cdp(tabId, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
+      type: 'mouseMoved', x: placed.x, y: placed.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
     });
-    await paintCursor(tabId, point.x, point.y);
-    return { hovered: point.label };
+    await paintCursor(tabId, placed.x, placed.y);
+    return { hovered: placed.label };
   },
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
-    const start = await resolvePoint(tabId, params, 'from');
-    const end = await resolvePoint(tabId, params, 'to');
+    let start = await resolvePoint(tabId, params, 'from');
+    let end = await resolvePoint(tabId, params, 'to');
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
@@ -1437,6 +1472,12 @@ const COMMANDS = {
     // Mouse input reaches no hidden tab; see ensureVisible. After both ends are
     // resolved and validated, so a command that then fails has not moved the view.
     await ensureVisible(tabId);
+    // Re-read both ends after activation: see resolveVisiblePoint.
+    start = await resolveVisiblePoint(tabId, params, 'from');
+    end = await resolveVisiblePoint(tabId, params, 'to');
+    if (!start || !end) {
+      throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
+    }
     await hideCursor(tabId);
     await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y, button: 'none', buttons: 0, modifiers: 0 });
     await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1, force: 0.5, modifiers: 0 });
