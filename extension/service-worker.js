@@ -933,6 +933,45 @@ async function describeTab(tabId) {
   return { tabId: tabId, url: tab.url || '', title: tab.title || '' };
 }
 
+/** One screenshot capture, taking the view only if a background one is refused. */
+async function captureOnce(tabId, options) {
+  const params = Object.assign({ fromSurface: true }, options);
+  try {
+    // A background tab is the normal case: the agent must not move the user's
+    // view to see a page. Bounded, so a frozen renderer cannot hang the call.
+    return await withTimeout(cdp(tabId, 'Page.captureScreenshot', params), 8000);
+  } catch (error) {
+    // Only when the background capture genuinely cannot be produced.
+    await chrome.tabs.update(tabId, { active: true });
+    await new Promise(resolve => setTimeout(resolve, 400));
+    return await cdp(tabId, 'Page.captureScreenshot', params);
+  }
+}
+
+/**
+ * Capture a page, re-encoding only when the first result is too big to send.
+ *
+ * PNG stays the default because it is lossless and most pages fit well inside
+ * the limit. The ladder is a guard against the pathological full-page capture,
+ * not a routine re-encode.
+ */
+async function captureBounded(tabId) {
+  const png = await captureOnce(tabId, { format: 'png' });
+  if (!png || typeof png.data !== 'string') throw new Error('the page returned no image data');
+  if (png.data.length <= SCREENSHOT_BASE64_LIMIT) return { base64: png.data, format: 'png' };
+  let smallest = null;
+  for (let attempt = 0; ; attempt += 1) {
+    const quality = nextJpegQuality(attempt);
+    if (quality === null) break;
+    const jpeg = await captureOnce(tabId, { format: 'jpeg', quality: quality });
+    if (!jpeg || typeof jpeg.data !== 'string') continue;
+    if (smallest === null || jpeg.data.length < smallest.length) smallest = jpeg.data;
+    if (jpeg.data.length <= SCREENSHOT_BASE64_LIMIT) return { base64: jpeg.data, format: 'jpeg' };
+  }
+  if (smallest === null) throw new Error('the page returned no image data');
+  return { base64: smallest, format: 'jpeg' };
+}
+
 /** The command table. Every method answers one JSON value. */
 const COMMANDS = {
 
@@ -1227,25 +1266,10 @@ const COMMANDS = {
     // The style is committed, but the compositor still holds the previous frame
     // for a beat; capture would otherwise catch the overlay mid-flight.
     await new Promise(resolve => setTimeout(resolve, 60));
-    let shot = null;
-    try {
-      // A background tab is the normal case: the agent must not move the user's
-      // view to see a page. Bounded, so a frozen renderer cannot hang the call.
-      shot = await withTimeout(
-        cdp(tabId, 'Page.captureScreenshot', { format: 'png', fromSurface: true }),
-        8000,
-      );
-    } catch (error) {
-      // Only when the background capture genuinely cannot be produced do we
-      // take the view — a last resort, not the default.
-      await chrome.tabs.update(tabId, { active: true });
-      await new Promise(resolve => setTimeout(resolve, 400));
-      shot = await cdp(tabId, 'Page.captureScreenshot', { format: 'png', fromSurface: true });
-    }
+    const shot = await captureBounded(tabId);
     const last = cursorAt.get(tabId);
     if (last) await paintCursor(tabId, last.x, last.y);
-    if (!shot || typeof shot.data !== 'string') throw new Error('the page returned no image data');
-    return { base64: shot.data };
+    return shot;
   },
 };
 

@@ -97,6 +97,10 @@ try {
   const shot = await call('screenshot', { tabId: opened.tabId });
   check('screenshot returns png data', typeof shot.base64 === 'string' && shot.base64.length > 1000, { len: (shot.base64 || '').length });
 
+  const shotInfo = await call('screenshot', { tabId: opened.tabId });
+  check('a screenshot reports the format it was encoded in',
+    shotInfo.format === 'png' || shotInfo.format === 'jpeg', shotInfo.format);
+
   const click = await call('click', { ref: 1, tabId: opened.tabId });
   check('click resolves a ref', typeof click.clicked === 'string' && click.clicked.length > 0, click);
 

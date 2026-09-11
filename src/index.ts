@@ -309,18 +309,21 @@ async function waitFor(ms: number): Promise<number> {
   return bounded
 }
 
-/** Capture a PNG and write it to disk, returning where it landed. */
+/** Capture a screenshot and write it to disk, returning where it landed. */
 async function captureScreenshot(
   bridge: Bridge,
   args: { tabId?: number; savePath?: string },
 ): Promise<{ path: string; bytes: number }> {
-  const captured = await bridge.call<{ base64?: unknown }>('screenshot', { tabId: args.tabId })
+  const captured = await bridge.call<{ base64?: unknown; format?: unknown }>('screenshot', { tabId: args.tabId })
   const base64 = typeof captured?.base64 === 'string' ? captured.base64 : ''
   if (base64 === '') throw new Error('chrome-agent: the extension returned no image data')
   const bytes = Buffer.from(base64, 'base64')
+  // The extension re-encodes an oversized capture as JPEG; writing JPEG bytes
+  // into a .png would hand the reader a file that lies about itself.
+  const extension = captured?.format === 'jpeg' ? '.jpg' : '.png'
   const path = typeof args.savePath === 'string' && args.savePath !== ''
     ? args.savePath
-    : join(tmpdir(), 'dsh-chrome-' + randomUUID() + '.png')
+    : join(tmpdir(), 'dsh-chrome-' + randomUUID() + extension)
   await writeFile(path, bytes)
   return { path, bytes: bytes.byteLength }
 }
@@ -590,11 +593,12 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_screenshot',
     description:
-      'Capture a PNG of the visible area of a tab and save it to disk, returning the file path. '
+      'Capture the visible area of a tab and save it to disk, returning the file path. '
+      + 'The file is a PNG, or a JPEG when the capture is very large. '
       + 'Use it for layout, images, canvas, or when the text snapshot is not enough; read the returned path with the image reader.',
     parameters: {
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
-      savePath: { type: 'string', description: 'Absolute path to write the PNG to. Defaults to a temp file.' },
+      savePath: { type: 'string', description: 'Absolute path to write the screenshot to. Defaults to a temp file.' },
     },
     output: {
       schema: {
@@ -606,7 +610,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         },
       },
       render: textRender<{ path: string; bytes: number }>(v =>
-        'Saved a ' + v.bytes + '-byte PNG screenshot to ' + v.path + '.',
+        'Saved a ' + v.bytes + '-byte screenshot to ' + v.path + '.',
       ),
     },
     execute: async (args: { tabId?: number; savePath?: string }, exec) => {
