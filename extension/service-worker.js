@@ -972,6 +972,52 @@ async function captureBounded(tabId) {
   return { base64: smallest, format: 'jpeg' };
 }
 
+/**
+ * Every frame a snapshot should read, main frame first.
+ */
+async function framesFor(tabId) {
+  const tree = await cdp(tabId, 'Page.getFrameTree', {});
+  const flat = flattenFrameTree(tree && tree.frameTree, FRAME_LIMIT);
+  if (flat.frames.length === 0) throw new Error('the page reported no frames');
+  return flat;
+}
+
+/**
+ * An execution context inside one frame.
+ *
+ * An isolated world rather than the page's own context: the page cannot see or
+ * redefine anything in it, so a page that shadows a global cannot break the
+ * walk. CDP is not subject to the same-origin policy, so this works in
+ * cross-origin frames too.
+ */
+async function frameContext(tabId, frameId) {
+  const created = await cdp(tabId, 'Page.createIsolatedWorld', {
+    frameId: frameId,
+    worldName: 'dsh-agent-snapshot',
+  });
+  if (!created || typeof created.executionContextId !== 'number') {
+    throw new Error('could not open an execution context in frame ' + frameId);
+  }
+  return created.executionContextId;
+}
+
+/** Evaluate an expression in one frame's isolated world. */
+async function evaluateIn(tabId, contextId, expression) {
+  const result = await cdp(tabId, 'Runtime.evaluate', {
+    expression: expression,
+    contextId: contextId,
+    returnByValue: true,
+    awaitPromise: true,
+    userGesture: true,
+  });
+  if (result && result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const thrown = details.exception && (details.exception.description || details.exception.value);
+    throw new Error('page error: ' + String(thrown || details.text || 'unknown'));
+  }
+  return result && result.result ? result.result.value : undefined;
+}
+
 /** The command table. Every method answers one JSON value. */
 const COMMANDS = {
 
@@ -1004,13 +1050,66 @@ const COMMANDS = {
 
   async snapshot(params) {
     const tabId = await resolveTabId(params.tabId);
-    const raw = await evaluate(tabId, SNAPSHOT_EXPRESSION);
-    const parsed = JSON.parse(String(raw));
-    const tree = parsed.tree === '' ? '(no interactive elements found)' : parsed.tree;
+    const flat = await framesFor(tabId);
+    const lines = [];
+    const frameText = [];
+    // Frames that could not be read. The frame tree and the execution contexts
+    // are read in separate calls, so a frame can navigate away in between. One
+    // frame going away must not cost the caller the whole snapshot, but it must
+    // not vanish silently either: the keys are reported in the trailer.
+    const unread = [];
+    let url = '';
+    let title = '';
+    let text = '';
+    for (let index = 0; index < flat.frames.length; index += 1) {
+      const frame = flat.frames[index];
+      let parsed;
+      try {
+        const contextId = await frameContext(tabId, frame.frameId);
+        const raw = await evaluateIn(tabId, contextId, SNAPSHOT_EXPRESSION);
+        if (typeof raw !== 'string') {
+          unread.push(frame.key);
+          continue;
+        }
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        unread.push(frame.key);
+        continue;
+      }
+      const isMain = frame.key === 'f0';
+      if (isMain) {
+        url = parsed.url;
+        title = parsed.title;
+        text = parsed.text;
+      } else if (parsed.text !== '') {
+        frameText.push('[' + frame.key + '] ' + String(parsed.text).slice(0, 400));
+      }
+      const tree = String(parsed.tree);
+      if (tree === '') continue;
+      const rows = tree.split('\n');
+      for (let row = 0; row < rows.length; row += 1) {
+        if (rows[row] === '') continue;
+        // A ref is an index into one document's array, so the document travels
+        // with it. The main frame stays unmarked, which keeps every existing
+        // ref in every existing prompt valid.
+        lines.push(isMain
+          ? rows[row]
+          : rows[row].replace(/^\[ref=(\d+)\]/, '[ref=$1 frame=' + frame.key + ']'));
+      }
+    }
+    const notes = [];
+    const skipped = flat.total - flat.frames.length;
+    if (skipped > 0) notes.push(skipped + ' further frame(s) not read');
+    if (unread.length > 0) {
+      notes.push(unread.length + ' frame(s) could not be read (' + unread.join(', ') + ')');
+    }
+    const suffix = notes.length === 0 ? '' : '\n\n… ' + notes.join('; ');
+    const tree = lines.length === 0 ? '(no interactive elements found)' : lines.join('\n');
+    const allText = frameText.length === 0 ? text : text + '\n' + frameText.join('\n');
     return {
-      url: parsed.url,
-      title: parsed.title,
-      snapshot: tree + '\n\n--- visible text ---\n' + parsed.text,
+      url: url,
+      title: title,
+      snapshot: tree + suffix + '\n\n--- visible text ---\n' + allText,
     };
   },
 

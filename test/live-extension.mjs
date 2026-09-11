@@ -305,6 +305,11 @@ try {
     '  }',
     '  console.log("capability-probe-log");',
     '  void fetch("https://example.com/?probe=1").catch(function () {});',
+    'var frame = document.createElement("iframe");',
+    'frame.id = "probe-frame";',
+    'frame.style.cssText = "position:absolute;top:200px;left:40px;width:400px;height:200px;border:0";',
+    'frame.srcdoc = "<button id=\"inner-btn\" style=\"width:200px;height:60px\">inner target</button>";',
+    'document.body.appendChild(frame);',
     '  return "ok";',
     '})()',
   ].join('\n');
@@ -326,6 +331,14 @@ try {
   } else {
     check('snapshot exposes a ref for the probe div', false, capSnap.snapshot.slice(0, 300));
   }
+
+  // Content inside a frame is invisible to a main-frame-only snapshot.
+  await new Promise(r => setTimeout(r, 600));
+  const framed = await call('snapshot', { tabId: cap.tabId });
+  check('a snapshot reports a ref from inside an iframe',
+    /frame=f\d+\]/.test(framed.snapshot), framed.snapshot.slice(0, 400));
+  check('a snapshot still reports main-frame refs unchanged',
+    /\[ref=\d+\] (?!.*frame=)/.test(framed.snapshot), framed.snapshot.slice(0, 200));
 
   // A background tab gets no wheel event from the compositor, and Chrome never
   // acks the call. It must fall back quickly rather than burn the caller's
