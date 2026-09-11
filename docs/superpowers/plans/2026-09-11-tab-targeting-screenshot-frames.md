@@ -1022,7 +1022,9 @@ In `test/live-extension.mjs`, after the frame snapshot checks:
 // page's. Clicking must apply the frame's offset.
 const innerRef = /\[ref=(\d+) frame=(f\d+)\]/.exec(framed.snapshot);
 if (innerRef) {
-  await call('eval', { tabId: cap.tabId, expression: 'window.__hit = false; document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; })' });
+  // chrome_eval wraps its input as \`var value = (<expr>);\`, so this must be ONE
+// expression — a statement list is a syntax error.
+await call('eval', { tabId: cap.tabId, expression: '(function () { document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; }); return "ok"; })()' });
   await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
   const hit = await call('eval', { tabId: cap.tabId, expression: 'String(document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true)' });
   check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
@@ -1119,7 +1121,9 @@ async function evaluateInFrame(tabId, frameKey, expression) {
 async function resolvePoint(tabId, params, prefix) {
   const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
   const found = await frameFor(tabId, frameKey);
-  const contextId = await frameContext(tabId, found.frame.frameId);
+  // No frameContext call here: evaluateInFrame resolves the context itself, and a
+  // spare one would mint a throwaway isolated world on every click, hover, drag,
+  // type and scroll.
   const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
   if (frameKey === '') return point;
