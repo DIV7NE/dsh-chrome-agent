@@ -151,6 +151,27 @@ function rememberTab(tabId) {
 }
 
 /**
+ * Refuse a tab the agent is not allowed to touch.
+ *
+ * The setting is read per call rather than cached so that flipping it in the
+ * options page takes effect on the next command, not the next worker.
+ */
+async function assertTabAllowed(tabId) {
+  const stored = await chrome.storage.local.get({ confineToAgentTabs: false });
+  if (stored.confineToAgentTabs !== true) return;
+  let groupId = -1;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
+  } catch (error) {
+    throw new Error('tab ' + tabId + ' is gone');
+  }
+  if (isTabAllowed(groupId, agentGroupId, true)) return;
+  throw new Error('Tab ' + tabId + " is not in the agent's tab group for this session. "
+    + 'Tools can only target tabs inside the group; call chrome_tabs to list the tabs the agent may use.');
+}
+
+/**
  * Resolve the tab a command acts on: the named one, else the tab the agent is
  * already working in.
  *
@@ -161,6 +182,7 @@ function rememberTab(tabId) {
  */
 async function resolveTabId(tabId) {
   if (typeof tabId === 'number') {
+    await assertTabAllowed(tabId);
     rememberTab(tabId);
     return tabId;
   }
@@ -168,6 +190,7 @@ async function resolveTabId(tabId) {
   if (remembered === null) {
     throw new Error('no tab yet — call chrome_open first, or pass an explicit tabId');
   }
+  await assertTabAllowed(remembered);
   return remembered;
 }
 
@@ -808,14 +831,16 @@ async function ensureLive(tabId) {
   await waitForLoad(tabId, 20000);
 }
 
-/** Add the agent group to a tab listing. */
+/** Add the agent group to a tab listing, and whether the agent may act on it. */
 function withGroup(tab) {
+  const groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
   return {
     id: tab.id,
     title: tab.title || '',
     url: tab.url || '',
     active: tab.active === true,
-    groupId: typeof tab.groupId === 'number' ? tab.groupId : -1,
+    groupId: groupId,
+    agent: agentGroupId !== null && groupId === agentGroupId,
   };
 }
 

@@ -3,6 +3,7 @@ const DEFAULT_PORT = 3080;
 
 const portInput = document.getElementById('port');
 const stateBox = document.getElementById('state');
+const confineBox = document.getElementById('confine');
 
 /** Chrome derives the id from the manifest key; show it so the user can compare with chrome_status. */
 function extensionId() {
@@ -10,8 +11,9 @@ function extensionId() {
 }
 
 async function refresh() {
-  const stored = await chrome.storage.local.get({ port: DEFAULT_PORT });
+  const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, confineToAgentTabs: false });
   portInput.value = String(stored.port || DEFAULT_PORT);
+  confineBox.checked = stored.confineToAgentTabs === true;
   const id = chrome.runtime.id;
   document.getElementById('id').textContent = id;
   stateBox.textContent = 'Extension id ' + id + '. Saving reconnects to the server on port ' + portInput.value + '.';
@@ -41,3 +43,11 @@ document.getElementById('save').addEventListener('click', async () => {
 });
 
 refresh();
+
+confineBox.addEventListener('change', async () => {
+  await chrome.storage.local.set({ confineToAgentTabs: confineBox.checked });
+  stateBox.textContent = confineBox.checked
+    ? 'Confined: the agent may only use tabs in its own group.'
+    : 'Not confined: the agent may use any tab you name.';
+  stateBox.className = '';
+});

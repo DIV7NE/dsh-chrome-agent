@@ -385,14 +385,15 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
             url: { type: 'string', required: true },
             active: { type: 'boolean', required: true },
             groupId: { type: 'integer', required: true, description: 'Tab group id, or -1 when the tab is ungrouped. Agent-opened tabs share one group.' },
+            agent: { type: 'boolean', required: true, description: 'True when the agent opened this tab — it is in the agent\'s own group.' },
           },
         },
       },
-      render: textRender<Array<{ id: number; title: string; url: string; active: boolean; groupId: number }>>(tabs =>
-        bullet(tabs.map(t => (t.active ? '* ' : '  ') + t.id + '  ' + t.title + '  ' + t.url + (t.groupId === -1 ? '' : '  [group ' + t.groupId + ']'))),
+      render: textRender<Array<{ id: number; title: string; url: string; active: boolean; groupId: number; agent: boolean }>>(tabs =>
+        bullet(tabs.map(t => (t.active ? '* ' : '  ') + t.id + '  ' + t.title + '  ' + t.url + (t.groupId === -1 ? '' : '  [group ' + t.groupId + ']') + (t.agent ? '  [agent]' : ''))),
       ),
     },
-    execute: async () => bridge.call<Array<{ id: number; title: string; url: string; active: boolean; groupId: number }>>('tabs'),
+    execute: async () => bridge.call<Array<{ id: number; title: string; url: string; active: boolean; groupId: number; agent: boolean }>>('tabs'),
   }))
 
   register(defineTool({

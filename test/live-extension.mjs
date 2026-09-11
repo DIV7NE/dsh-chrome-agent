@@ -238,6 +238,16 @@ try {
 
   await call('close', { tabId: userTab.tabId });
 
+  // The listing has to say which tabs are the agent's own; every targeting
+  // decision the model makes reads this flag.
+  const ownTab = await call('open', { url: 'https://example.com/?own=1', newTab: true });
+  const listing = await call('tabs');
+  const own = listing.filter(t => t.id === ownTab.tabId)[0];
+  const others = listing.filter(t => t.id !== ownTab.tabId);
+  check('a tab the agent opened is reported as its own', own && own.agent === true, own);
+  check('a tab the agent did not open is not', others.length > 0 && others.every(t => t.agent === false), others.slice(0, 3));
+  await call('close', { tabId: ownTab.tabId });
+
   // --- agent cursor -----------------------------------------------------------
   console.log('');
   console.log('agent cursor');
