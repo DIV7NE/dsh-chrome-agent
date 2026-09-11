@@ -1063,10 +1063,21 @@ const COMMANDS = {
     let text = '';
     for (let index = 0; index < flat.frames.length; index += 1) {
       const frame = flat.frames[index];
+      const isMain = frame.key === 'f0';
       let parsed;
       try {
-        const contextId = await frameContext(tabId, frame.frameId);
-        const raw = await evaluateIn(tabId, contextId, SNAPSHOT_EXPRESSION);
+        // The main frame is read in the page's own world, exactly as it was
+        // before frames existed: SNAPSHOT_EXPRESSION parks its refs in
+        // window.__dshChromeRefs, and click/type/scroll/hover/drag still resolve
+        // them through evaluate() in that same world. Reading the main frame in
+        // an isolated world would leave every main-frame ref unreachable.
+        //
+        // A child frame has no main-world consumers yet, so it is read in its own
+        // isolated world: the page cannot see or redefine anything in it, and CDP
+        // reaches cross-origin frames regardless.
+        const raw = isMain
+          ? await evaluate(tabId, SNAPSHOT_EXPRESSION)
+          : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), SNAPSHOT_EXPRESSION);
         if (typeof raw !== 'string') {
           unread.push(frame.key);
           continue;
@@ -1076,7 +1087,6 @@ const COMMANDS = {
         unread.push(frame.key);
         continue;
       }
-      const isMain = frame.key === 'f0';
       if (isMain) {
         url = parsed.url;
         title = parsed.title;

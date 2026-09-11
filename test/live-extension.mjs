@@ -340,6 +340,22 @@ try {
   check('a snapshot still reports main-frame refs unchanged',
     /\[ref=\d+\] (?!.*frame=)/.test(framed.snapshot), framed.snapshot.slice(0, 200));
 
+  // A main-frame ref is resolved in the page's own world, so walking child frames
+  // must not have moved the main frame's refs into an isolated world. Refs are
+  // per-snapshot, so the ref has to come from the snapshot just taken.
+  const mainRef = /^\[ref=(\d+)\] (?![^\n]*frame=)/m.exec(framed.snapshot);
+  check('a main-frame ref is still listed after a frame snapshot', mainRef !== null, framed.snapshot.slice(0, 300));
+  let mainRefError = null;
+  if (mainRef) {
+    try {
+      await call('scroll', { ref: Number(mainRef[1]), tabId: cap.tabId });
+    } catch (error) {
+      mainRefError = String(error.message);
+    }
+  }
+  check('a main-frame ref still resolves after a frame snapshot',
+    mainRef !== null && mainRefError === null, mainRefError);
+
   // A background tab gets no wheel event from the compositor, and Chrome never
   // acks the call. It must fall back quickly rather than burn the caller's
   // whole timeout, so time it with the tab deliberately put in the background.
