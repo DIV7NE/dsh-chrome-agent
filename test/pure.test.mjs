@@ -23,6 +23,7 @@ const {
   isTabAllowed,
   pointInViewport,
   sumFrameOffsets,
+  framePointToViewport,
 } = globalThis.DSH_PURE
 
 /** A frame tree node shaped like Page.getFrameTree's. A leaf omits childFrames. */
@@ -171,4 +172,30 @@ test('frame offsets sum up the chain', () => {
 test('an unreadable offset refuses rather than guessing', () => {
   assert.equal(sumFrameOffsets([[1, 2, 3]]), null)
   assert.equal(sumFrameOffsets([null]), null)
+})
+
+test('a frame point converts from document space to the top viewport', () => {
+  // The measurement that found the bug: an iframe at document top 200, the
+  // button at frame-local y 38, the page scrolled down 900. The document-space
+  // sum (238) must lose the top scroll and become -662, not stay at 238.
+  assert.deepEqual(
+    framePointToViewport({ x: 108, y: 38 }, { x: 40, y: 200 }, { x: 0, y: 900 }),
+    { x: 148, y: -662 },
+  )
+  // Unscrolled, the two spaces coincide — the case every earlier test passed.
+  assert.deepEqual(
+    framePointToViewport({ x: 108, y: 38 }, { x: 40, y: 200 }, { x: 0, y: 0 }),
+    { x: 148, y: 238 },
+  )
+  // Horizontal scroll counts too, and negative scroll is not special-cased.
+  assert.deepEqual(
+    framePointToViewport({ x: 10, y: 10 }, { x: 5, y: 5 }, { x: -20, y: 4 }),
+    { x: 35, y: 11 },
+  )
+})
+
+test('an unreadable scroll refuses rather than guessing', () => {
+  assert.equal(framePointToViewport({ x: 1, y: 2 }, { x: 3, y: 4 }, null), null)
+  assert.equal(framePointToViewport({ x: NaN, y: 2 }, { x: 3, y: 4 }, { x: 0, y: 0 }), null)
+  assert.equal(framePointToViewport({ x: 1, y: 2 }, { x: 3, y: 4 }, { x: 0, y: undefined }), null)
 })

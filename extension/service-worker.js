@@ -24,6 +24,7 @@ const chooseJpegAttempt = PURE.chooseJpegAttempt;
 const isTabAllowed = PURE.isTabAllowed;
 const pointInViewport = PURE.pointInViewport;
 const sumFrameOffsets = PURE.sumFrameOffsets;
+const framePointToViewport = PURE.framePointToViewport;
 
 const DEFAULT_PORT = 3080;
 const PROTOCOL_VERSION = 1;
@@ -617,62 +618,96 @@ function pointExpressionFor(params, prefix) {
 }
 
 /**
+ * Scroll a frame's owner element into view, in the document that holds it.
+ *
+ * `DOM.scrollIntoViewIfNeeded` looked like the right call, but for a frame
+ * owner it did nothing here and its errors were swallowed, so the frame stayed
+ * off-screen and the click was dispatched anyway. Resolve the owner to a JS
+ * object and scroll it with `scrollIntoView` — the same call the page-side
+ * resolver uses — and let any failure throw, so an unreachable frame refuses
+ * instead of silently clicking the wrong place.
+ */
+async function bringFrameIntoView(tabId, backendNodeId, frameKey) {
+  let objectId = null;
+  try {
+    const resolved = await cdp(tabId, 'DOM.resolveNode', { backendNodeId: backendNodeId });
+    objectId = resolved && resolved.object ? resolved.object.objectId : null;
+  } catch (error) {
+    throw new Error('cannot bring frame ' + frameKey + ' into view: '
+      + (error && error.message ? error.message : error));
+  }
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw new Error('cannot bring frame ' + frameKey + ' into view (its container is not a scriptable '
+      + 'element), so a click would land in the wrong place — pass x and y explicitly instead');
+  }
+  try {
+    await cdp(tabId, 'Runtime.callFunctionOn', {
+      objectId: objectId,
+      functionDeclaration: 'function () { this.scrollIntoView({ block: "center", inline: "center", '
+        + 'behavior: "instant" }); }',
+    });
+  } catch (error) {
+    throw new Error('cannot bring frame ' + frameKey + ' into view: '
+      + (error && error.message ? error.message : error));
+  }
+}
+
+/**
  * Sum the offsets of a frame and every frame between it and the top.
  *
  * DOM.getFrameOwner names the element a frame is loaded in, and DOM.getBoxModel
- * gives that element's box in its own parent, so walking up the chain turns a
- * frame's local point into the top-level one a CDP mouse event needs.
+ * gives that element's box in its own parent. The quads are scroll-unadjusted,
+ * so the sum is the frame's position in the top frame's DOCUMENT space — not
+ * viewport space; `resolvePoint` applies the top frame's scroll before the
+ * point is dispatched.
  *
- * @returns the offset, or throws: a wrong click is worse than a refused one.
+ * The frame element can itself be scrolled out of the top page's viewport.
+ * el.scrollIntoView inside pointExpressionFor scrolls the frame's own content,
+ * never the frame element, so each ancestor frame is brought into view first —
+ * outermost first, so an inner frame is only scrolled once the frame that holds
+ * it is visible. Because the box quads are scroll-unadjusted, which frame is in
+ * view does not change them; the scroll is what makes the final point land on
+ * screen.
+ *
+ * @returns the document-space offset, or throws: a wrong click is worse than a
+ *   refused one.
  */
 async function frameOffsetFor(tabId, frames, frameKey) {
   const byKey = {};
   for (let i = 0; i < frames.length; i += 1) byKey[frames[i].key] = frames[i];
-  // The frame element can itself be scrolled out of the top page's viewport.
-  // el.scrollIntoView inside pointExpressionFor scrolls the frame's own content,
-  // never the frame element, so a box-model read here would report a negative y
-  // and CDP would dispatch the click outside the viewport, where nothing
-  // receives it. Bring each ancestor frame into view, outermost first, so the
-  // box-model reads below reflect the post-scroll position.
   const chain = [];
   for (let current = byKey[frameKey]; current && current.parentKey; current = byKey[current.parentKey]) {
     chain.push(current);
   }
-  for (let i = chain.length - 1; i >= 0; i -= 1) {
-    try {
-      const owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: chain[i].frameId });
-      if (owner && typeof owner.backendNodeId === 'number') {
-        await cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId: owner.backendNodeId });
-      }
-    } catch (error) {
-      // Best effort: the box-model read below still reports the frame's real
-      // position, and throws if it cannot be determined at all.
-    }
-  }
   const quads = [];
-  let current = byKey[frameKey];
-  while (current && current.parentKey) {
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const frame = chain[i];
     let owner = null;
     try {
-      owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: current.frameId });
+      owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: frame.frameId });
     } catch (error) {
       owner = null;
     }
+    if (!owner || typeof owner.backendNodeId !== 'number') {
+      // A frame whose owner cannot be named cannot be measured or scrolled.
+      // Swallowing this was the bug: the frame stayed off-screen and the click
+      // was dispatched anyway.
+      throw new Error('cannot locate the element that holds frame ' + frame.key
+        + ' on the page, so a click would land in the wrong place — pass x and y explicitly instead');
+    }
+    await bringFrameIntoView(tabId, owner.backendNodeId, frame.key);
     let box = null;
-    if (owner && typeof owner.backendNodeId === 'number') {
-      try {
-        box = await cdp(tabId, 'DOM.getBoxModel', { backendNodeId: owner.backendNodeId });
-      } catch (error) {
-        box = null;
-      }
+    try {
+      box = await cdp(tabId, 'DOM.getBoxModel', { backendNodeId: owner.backendNodeId });
+    } catch (error) {
+      box = null;
     }
     const border = box && box.model ? box.model.border : null;
     if (!Array.isArray(border)) {
-      throw new Error('cannot place frame ' + current.key + ' on the page (its container has no box), '
+      throw new Error('cannot place frame ' + frame.key + ' on the page (its container has no box), '
         + 'so a click would land in the wrong place — pass x and y explicitly instead');
     }
     quads.push(border);
-    current = byKey[current.parentKey];
   }
   const sum = sumFrameOffsets(quads);
   if (sum === null) {
@@ -745,7 +780,16 @@ async function resolvePoint(tabId, params, prefix) {
   if (frameKey === '') return point;
   const found = await frameFor(tabId, frameKey);
   const offset = await frameOffsetFor(tabId, found.frames, frameKey);
-  return { x: point.x + offset.x, y: point.y + offset.y, label: point.label };
+  // The offset is document space; CDP input is viewport space. Subtract the top
+  // frame's scroll — read once, after the frame has been scrolled into view —
+  // or a scrolled page silently clicks the wrong place.
+  const scroll = await evaluate(tabId, '({ x: window.scrollX, y: window.scrollY })');
+  const placed = framePointToViewport(point, offset, scroll);
+  if (placed === null) {
+    throw new Error('cannot read the page scroll, so frame ' + frameKey + ' cannot be placed — '
+      + 'pass x and y explicitly instead');
+  }
+  return { x: placed.x, y: placed.y, label: point.label };
 }
 
 /** Page-side focus resolver for chrome_type. */

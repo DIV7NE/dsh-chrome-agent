@@ -174,16 +174,28 @@ not the top-level page, and CDP mouse events take top-level viewport coordinates
 A ref from a frame therefore needs its offset accumulated up the tree: for each
 ancestor frame, `DOM.getFrameOwner({ frameId })` gives the frame's element, and
 `DOM.getBoxModel` gives that element's box in its own parent. Summing the chain
-yields the offset the click needs. `DOM.enable` is already on
-(`ensureAttached`, `service-worker.js:126`).
+yields the frame element's position in the top frame's **document** space.
+`DOM.getBoxModel` is scroll-unadjusted, so that sum is *not* yet viewport space:
+the top frame's own `window.scrollX`/`window.scrollY` is subtracted once per
+resolution (`framePointToViewport`) before the point is dispatched. Only the top
+frame's scroll applies at any nesting depth — each level's box is already in its
+parent's document space, and the deepest point comes from
+`getBoundingClientRect`, so the frames between cancel out. Reading the sum as
+viewport space is correct only while the top page is unscrolled, and that
+assumption was the bug. `DOM.enable` is already on (`ensureAttached`,
+`service-worker.js:126`).
 
-The frame element can itself be scrolled out of the top page's viewport, so
-before the offsets are read, each ancestor frame is brought into view —
-outermost first, via `DOM.getFrameOwner` then `DOM.scrollIntoViewIfNeeded` —
-and the box-model read afterwards reflects that position. `scrollIntoView`
-inside the frame scrolls the frame's own content, not the frame element in the
-top page, so without this a click is dispatched at a negative y where nothing
-receives it.
+The frame element can itself be scrolled out of the top page's viewport.
+`scrollIntoView` inside the frame scrolls the frame's own content, never the
+frame element in the top page, so each ancestor frame is resolved to a JS object
+(`DOM.resolveNode`) and scrolled with `scrollIntoView` — outermost first, so an
+inner frame is only scrolled once the frame that holds it is visible. Because
+the box quads are scroll-unadjusted, which ancestor is in view does not change
+them; the scroll is what makes the final viewport point land on screen. Resolving
+or scrolling an owner that fails throws rather than being swallowed: a frame that
+cannot be brought into view must refuse, never dispatch. `DOM.scrollIntoViewIfNeeded`
+was tried first and silently no-oped on a frame owner, which is how the frame
+stayed off-screen while the click was dispatched anyway.
 
 If any offset in the chain cannot be determined (the frame's owner element is
 `display: none`, or an ancestor has no box model), the command **fails with a
@@ -285,9 +297,11 @@ suite without a test-only command, which is not worth adding.
 
 ## Risks and limits
 
-- Clicking a ref inside a frame depends on `DOM.getFrameOwner` and
-  `DOM.getBoxModel` succeeding for every ancestor; when they do not, the click is
-  refused rather than approximated.
+- Clicking a ref inside a frame depends on `DOM.getFrameOwner`, `DOM.resolveNode`
+  and `DOM.getBoxModel` succeeding for every ancestor, and on the owner scrolling
+  into view; when they do not, the click is refused rather than approximated. The
+  conversion from document space to viewport space needs the top frame's scroll —
+  a scrolled descendant tab with a still top frame is the case a test must cover.
 - The 12-frame cap means the very deepest content on a frame-heavy page is not
   read. Tree order makes what is skipped predictable.
 - `importScripts` keeps the service worker classic. Converting it to an ES module

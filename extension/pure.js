@@ -169,6 +169,34 @@
     return { x: x, y: y };
   }
 
+  /**
+   * Convert a frame-local point into the top frame's viewport coordinates.
+   *
+   * `sumFrameOffsets` sums `DOM.getBoxModel` quads, and those are
+   * scroll-unadjusted: the sum names the frame element's position in the top
+   * DOCUMENT. CDP mouse events take top-level VIEWPORT coordinates, so the top
+   * frame's own scroll offsets are subtracted here. Only the top frame's scroll
+   * applies: each level's box is already in its parent's document space, and a
+   * point measured inside the deepest frame with `getBoundingClientRect` is in
+   * that frame's viewport, so the frames between cancel out of the sum. Reading
+   * the sum as viewport coordinates is correct only while the top page is
+   * unscrolled, which is the bug this conversion exists to fix.
+   *
+   * @param point - the point in the deepest frame's own viewport.
+   * @param offset - the summed document-space offset of the frame chain.
+   * @param scroll - the top frame's `window.scrollX`/`window.scrollY`.
+   * @returns the point, or null when any input is malformed, so a caller refuses
+   *   rather than clicks at a guessed position.
+   */
+  function framePointToViewport(point, offset, scroll) {
+    if (!point || !offset || !scroll) return null;
+    var values = [point.x, point.y, offset.x, offset.y, scroll.x, scroll.y];
+    for (var i = 0; i < values.length; i += 1) {
+      if (typeof values[i] !== 'number' || !isFinite(values[i])) return null;
+    }
+    return { x: point.x + offset.x - scroll.x, y: point.y + offset.y - scroll.y };
+  }
+
   root.DSH_PURE = {
     FRAME_LIMIT: FRAME_LIMIT,
     SCREENSHOT_BASE64_LIMIT: SCREENSHOT_BASE64_LIMIT,
@@ -180,5 +208,6 @@
     isTabAllowed: isTabAllowed,
     pointInViewport: pointInViewport,
     sumFrameOffsets: sumFrameOffsets,
+    framePointToViewport: framePointToViewport,
   };
 })(typeof self !== 'undefined' ? self : globalThis);
