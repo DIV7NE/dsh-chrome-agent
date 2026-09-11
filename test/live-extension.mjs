@@ -356,6 +356,18 @@ try {
   check('a main-frame ref still resolves after a frame snapshot',
     mainRef !== null && mainRefError === null, mainRefError);
 
+  // A ref inside a frame resolves in that frame's coordinates, which are not the
+  // page's. Clicking must apply the frame's offset.
+  const innerRef = /\[ref=(\d+) frame=(f\d+)\]/.exec(framed.snapshot);
+  if (innerRef) {
+    await call('eval', { tabId: cap.tabId, expression: 'window.__hit = false; document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; })' });
+    await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
+    const hit = await call('eval', { tabId: cap.tabId, expression: 'String(document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true)' });
+    check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
+  } else {
+    check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
+  }
+
   // A background tab gets no wheel event from the compositor, and Chrome never
   // acks the call. It must fall back quickly rather than burn the caller's
   // whole timeout, so time it with the tab deliberately put in the background.

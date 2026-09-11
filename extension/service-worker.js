@@ -421,9 +421,10 @@ const CURSOR_HALO = 'rgba(122,162,247,0.50)';
  * DOM.setFileInputFiles addresses an element by objectId, not by value, so the
  * file input has to be evaluated with returnByValue off.
  */
-async function evaluateHandle(tabId, expression) {
+async function evaluateHandle(tabId, contextId, expression) {
   const result = await cdp(tabId, 'Runtime.evaluate', {
     expression: expression,
+    contextId: contextId,
     returnByValue: false,
     awaitPromise: true,
     userGesture: true,
@@ -604,6 +605,92 @@ function pointExpressionFor(params, prefix) {
 /** The plain single-target resolver used by click, hover and type. */
 function pointExpression(params) {
   return pointExpressionFor(params, '');
+}
+
+/**
+ * Sum the offsets of a frame and every frame between it and the top.
+ *
+ * DOM.getFrameOwner names the element a frame is loaded in, and DOM.getBoxModel
+ * gives that element's box in its own parent, so walking up the chain turns a
+ * frame's local point into the top-level one a CDP mouse event needs.
+ *
+ * @returns the offset, or throws: a wrong click is worse than a refused one.
+ */
+async function frameOffsetFor(tabId, frames, frameKey) {
+  const byKey = {};
+  for (let i = 0; i < frames.length; i += 1) byKey[frames[i].key] = frames[i];
+  const quads = [];
+  let current = byKey[frameKey];
+  while (current && current.parentKey) {
+    let owner = null;
+    try {
+      owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: current.frameId });
+    } catch (error) {
+      owner = null;
+    }
+    let box = null;
+    if (owner && typeof owner.backendNodeId === 'number') {
+      try {
+        box = await cdp(tabId, 'DOM.getBoxModel', { backendNodeId: owner.backendNodeId });
+      } catch (error) {
+        box = null;
+      }
+    }
+    const border = box && box.model ? box.model.border : null;
+    if (!Array.isArray(border)) {
+      throw new Error('cannot place frame ' + current.key + ' on the page (its container has no box), '
+        + 'so a click would land in the wrong place — pass x and y explicitly instead');
+    }
+    quads.push(border);
+    current = byKey[current.parentKey];
+  }
+  const sum = sumFrameOffsets(quads);
+  if (sum === null) {
+    throw new Error('cannot place frame ' + frameKey + ' on the page, so a click would land in the '
+      + 'wrong place — pass x and y explicitly instead');
+  }
+  return sum;
+}
+
+/** One frame, by its key; the empty key means the main frame. */
+async function frameFor(tabId, frameKey) {
+  const flat = await framesFor(tabId);
+  const wanted = frameKey === '' ? 'f0' : frameKey;
+  for (let i = 0; i < flat.frames.length; i += 1) {
+    if (flat.frames[i].key === wanted) return { frame: flat.frames[i], frames: flat.frames };
+  }
+  throw new Error('no frame ' + wanted + ' on this page — take a fresh chrome_snapshot');
+}
+
+/** Evaluate an expression inside the named frame; the empty key is the main frame. */
+async function evaluateInFrame(tabId, frameKey, expression) {
+  // The main frame is evaluated in the page's own world, which is where the
+  // snapshot wrote its refs and where every existing ref consumer looks. Only a
+  // child frame uses an isolated world. This is the single place the choice is
+  // made, so click, hover, type, scroll, upload and drag all inherit it.
+  if (frameKey === '') return evaluate(tabId, expression);
+  const found = await frameFor(tabId, frameKey);
+  const contextId = await frameContext(tabId, found.frame.frameId);
+  return evaluateIn(tabId, contextId, expression);
+}
+
+/**
+ * Resolve a click, hover, type, scroll or upload target to top-level viewport
+ * coordinates.
+ *
+ * @param params - the command's arguments.
+ * @param prefix - '', 'from' or 'to', naming the argument group.
+ * @returns the point, or null when the target does not exist.
+ */
+async function resolvePoint(tabId, params, prefix) {
+  const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
+  const found = await frameFor(tabId, frameKey);
+  const contextId = await frameContext(tabId, found.frame.frameId);
+  const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
+  if (!point) return null;
+  if (frameKey === '') return point;
+  const offset = await frameOffsetFor(tabId, found.frames, frameKey);
+  return { x: point.x + offset.x, y: point.y + offset.y, label: point.label };
 }
 
 /** Page-side focus resolver for chrome_type. */
@@ -1129,7 +1216,7 @@ const COMMANDS = {
     let y = typeof params.y === 'number' ? params.y : null;
     let label = 'coordinates ' + x + ',' + y;
     if (x === null || y === null) {
-      const point = await evaluate(tabId, pointExpression(params));
+      const point = await resolvePoint(tabId, params, '');
       if (!point) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
       x = point.x;
       y = point.y;
@@ -1159,7 +1246,7 @@ const COMMANDS = {
 
   async hover(params) {
     const tabId = await resolveTabId(params.tabId);
-    const point = await evaluate(tabId, pointExpression(params));
+    const point = await resolvePoint(tabId, params, '');
     if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
     await cdp(tabId, 'Input.dispatchMouseEvent', {
       type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
@@ -1170,8 +1257,8 @@ const COMMANDS = {
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
-    const start = await evaluate(tabId, pointExpressionFor(params, 'from'));
-    const end = await evaluate(tabId, pointExpressionFor(params, 'to'));
+    const start = await resolvePoint(tabId, params, 'from');
+    const end = await resolvePoint(tabId, params, 'to');
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
@@ -1198,7 +1285,7 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const hasTarget = typeof params.ref === 'number' || typeof params.selector === 'string';
     if (hasTarget) {
-      const moved = await evaluate(tabId, scrollToExpression(params));
+      const moved = await evaluateInFrame(tabId, normaliseFrameKey(params.frame), scrollToExpression(params));
       if (moved !== true) throw new Error('scroll target not found — take a fresh chrome_snapshot');
       return { scrolled: 'element into view' };
     }
@@ -1285,7 +1372,13 @@ const COMMANDS = {
       ? params.files.filter(file => typeof file === 'string' && file !== '')
       : [];
     if (files.length === 0) throw new Error('upload needs at least one absolute path in `files`');
-    const objectId = await evaluateHandle(tabId, uploadTargetExpression(params));
+    const uploadFrameKey = normaliseFrameKey(params.frame);
+    const uploadFrame = await frameFor(tabId, uploadFrameKey);
+    // undefined context means the page's own world, matching evaluateInFrame.
+    const uploadContext = uploadFrameKey === ''
+      ? undefined
+      : await frameContext(tabId, uploadFrame.frame.frameId);
+    const objectId = await evaluateHandle(tabId, uploadContext, uploadTargetExpression(params));
     if (objectId === null) throw new Error('no file input found — pass a ref or selector for the input[type=file]');
     await cdp(tabId, 'DOM.setFileInputFiles', { files: files, objectId: objectId });
     return { uploaded: files.length };
@@ -1295,7 +1388,7 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const text = typeof params.text === 'string' ? params.text : '';
     if (text !== '') {
-      const focused = await evaluate(tabId, focusExpression(params));
+      const focused = await evaluateInFrame(tabId, normaliseFrameKey(params.frame), focusExpression(params));
       if (focused !== true) throw new Error('no element to type into — pass a ref or selector');
       await cdp(tabId, 'Input.insertText', { text: text });
     }

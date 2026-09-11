@@ -470,6 +470,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y: { type: 'integer', description: 'Viewport y, with x, for a coordinate click.' },
       button: { type: 'string', description: 'Which button: left (default), right, or middle.' },
       clicks: { type: 'integer', description: '1 (default), 2 for a double click, or 3 for a triple click.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -489,6 +493,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y?: number
       button?: string
       clicks?: number
+      frame?: string
       tabId?: number
     }, exec) => {
       exec.signal.throwIfAborted()
@@ -506,6 +511,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot; focused when omitted.' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
       submit: { type: 'boolean', description: 'Press Enter after typing.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -518,7 +527,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.',
       ),
     },
-    execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; tabId?: number }, exec) => {
+    execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('type', args)
     },
@@ -628,6 +637,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
       x: { type: 'integer', description: 'Viewport x, with y.' },
       y: { type: 'integer', description: 'Viewport y, with x.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -638,7 +651,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ hovered: string }>(v => 'Hovering ' + v.hovered + '.'),
     },
-    execute: async (args: { ref?: number; selector?: string; x?: number; y?: number; tabId?: number }, exec) => {
+    execute: async (args: { ref?: number; selector?: string; x?: number; y?: number; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ hovered: string }>('hover', args)
     },
@@ -657,6 +670,14 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       toSelector: { type: 'string', description: 'End CSS selector.' },
       toX: { type: 'integer', description: 'End viewport x.' },
       toY: { type: 'integer', description: 'End viewport y.' },
+      fromFrame: {
+        type: 'string',
+        description: 'Frame the fromRef belongs to, as chrome_snapshot writes it. Omit for the main page.',
+      },
+      toFrame: {
+        type: 'string',
+        description: 'Frame the toRef belongs to, as chrome_snapshot writes it. Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -682,6 +703,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       selector: { type: 'string', description: 'CSS selector to scroll into view.' },
       deltaY: { type: 'integer', description: 'Pixels to scroll vertically when there is no target.' },
       deltaX: { type: 'integer', description: 'Pixels to scroll horizontally when there is no target.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -692,7 +717,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ scrolled: string }>(v => 'Scrolled ' + v.scrolled + '.'),
     },
-    execute: async (args: { ref?: number; selector?: string; deltaY?: number; deltaX?: number; tabId?: number }, exec) => {
+    execute: async (args: { ref?: number; selector?: string; deltaY?: number; deltaX?: number; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ scrolled: string }>('scroll', args)
     },
@@ -875,6 +900,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       ref: { type: 'integer', description: 'The input[type=file] ref from chrome_snapshot.' },
       selector: { type: 'string', description: 'CSS selector for the input.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
@@ -885,7 +914,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ uploaded: number }>(v => 'Attached ' + v.uploaded + ' file(s).'),
     },
-    execute: async (args: { files: string[]; ref?: number; selector?: string; tabId?: number }, exec) => {
+    execute: async (args: { files: string[]; ref?: number; selector?: string; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ uploaded: number }>('upload', args)
     },
