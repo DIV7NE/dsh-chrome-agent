@@ -13,6 +13,9 @@
  * port to the port below on its options page, then run this. Set the port back
  * to your server's afterwards.
  */
+import { writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocketServer } from 'ws'
 
 const PORT = Number(process.argv[2] || 3099);
@@ -96,6 +99,10 @@ try {
 
   const shot = await call('screenshot', { tabId: opened.tabId });
   check('screenshot returns png data', typeof shot.base64 === 'string' && shot.base64.length > 1000, { len: (shot.base64 || '').length });
+
+  const shotInfo = await call('screenshot', { tabId: opened.tabId });
+  check('a screenshot reports the format it was encoded in',
+    shotInfo.format === 'png' || shotInfo.format === 'jpeg', shotInfo.format);
 
   const click = await call('click', { ref: 1, tabId: opened.tabId });
   check('click resolves a ref', typeof click.clicked === 'string' && click.clicked.length > 0, click);
@@ -211,14 +218,67 @@ try {
   check('a capture does not steal the view', !!afterShot && afterShot.active === false, afterShot);
   await call('eval', {
     tabId: bgA.tabId,
-    expression: '(function () { document.body.innerHTML = \'<input id="k" type="text">\'; return "ok"; })()',
+    expression: '(function () { document.body.innerHTML = \'<input id="k" type="text">\'; document.getElementById("k").addEventListener("click", function () { this.dataset.clicked = "yes"; }); return "ok"; })()',
   });
   await call('type', { selector: '#k', text: 'background typing', tabId: bgA.tabId });
   const bgValue = await call('eval', { tabId: bgA.tabId, expression: 'document.activeElement.value' });
   check('typing reaches a background tab', String(bgValue.result).indexOf('background') !== -1, bgValue);
+  // The click must actually land, not just leave the tab inactive. A click that
+  // dispatches nothing would pass a "the view did not move" check vacuously.
+  // Mouse input reaches no hidden tab, so the command activates it first.
   await call('click', { selector: '#k', tabId: bgA.tabId });
-  const afterClick = (await call('tabs')).find(t => t.id === bgA.tabId);
-  check('a click does not steal the view', !!afterClick && afterClick.active === false, afterClick);
+  const clickLanding = await call('eval', { tabId: bgA.tabId, expression: 'document.getElementById("k").dataset.clicked === "yes"' });
+  check('a click on a background tab actually reaches the page', String(clickLanding.result) === 'true', clickLanding);
+
+  // Targeting: a command with no tabId must use the agent's own tab. The old
+  // fallback was "the active tab of the last focused window", which means a bare
+  // call could click whatever the user happened to be looking at.
+  console.log('tab targeting');
+  const userTab = await call('open', { url: 'https://example.com/?user=1', newTab: true });
+  const agentTab = await call('open', { url: 'https://example.com/?agent=1', newTab: true });
+  const implicit = await call('eval', { expression: 'location.search' });
+  check('a command without a tabId uses the agent tab it opened last',
+    String(implicit.result).indexOf('agent=1') !== -1, implicit);
+
+  await call('close', { tabId: agentTab.tabId });
+  // The remembered tab is cleared by tabs.onRemoved, which is asynchronous: a bare
+  // command sent the instant after close can still see the closed id and fail with
+  // "No tab with id" instead of "no tab yet". Both mean nothing resolved; what
+  // must never happen is a success, which would mean a bare command reached a tab
+  // the agent did not open. Retry so the listener has time to catch up.
+  let noTabError = '';
+  let bareValue = null;
+  const targetingDeadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      bareValue = await call('eval', { expression: 'location.search' });
+      break;
+    } catch (error) {
+      noTabError = String(error.message);
+      if (/no tab yet/.test(noTabError) || Date.now() > targetingDeadline) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  check('with the remembered tab closed a bare command fails instead of using the user tab',
+    bareValue === null && /no tab yet/.test(noTabError), { bareValue, noTabError });
+
+  await call('close', { tabId: userTab.tabId });
+
+  // The listing has to say which tabs are the agent's own; every targeting
+  // decision the model makes reads this flag.
+  const ownTab = await call('open', { url: 'https://example.com/?own=1', newTab: true });
+  const listing = await call('tabs');
+  const own = listing.filter(t => t.id === ownTab.tabId)[0];
+  // The agent's own tabs all share one group; anything outside it is the user's.
+  const foreign = listing.filter(t => t.groupId !== own.groupId);
+  check('a tab the agent opened is reported as its own', own && own.agent === true, own);
+  // Whether the user happens to have a tab outside the group is not this check's
+  // business; when one exists it must not be marked as the agent's. A browser
+  // whose only tabs are the agent's own must not fail it, so the count is
+  // reported separately rather than required to be non-zero.
+  check('a tab outside the agent group is not marked as the agent\'s',
+    foreign.every(t => t.agent === false), { foreignCount: foreign.length, foreign: foreign.slice(0, 3) });
+  await call('close', { tabId: ownTab.tabId });
 
   // --- agent cursor -----------------------------------------------------------
   console.log('');
@@ -258,7 +318,9 @@ try {
   const pageHtml = '<div style="height:3000px">tall</div>'
     + '<button id="b" style="width:120px;height:40px">B</button>'
     + '<input id="f" type="file">'
-    + '<div id="box" style="width:80px;height:80px;background:#ccc">box</div>';
+    // role=button + tabindex make #box genuinely interactive, so chrome_snapshot
+    // lists it and the scroll-to-ref and drag checks below have a real ref.
+    + '<div id="box" role="button" tabindex="0" style="width:80px;height:80px;background:#ccc">box</div>';
   const install = [
     '(function () {',
     '  document.body.innerHTML = ' + JSON.stringify(pageHtml) + ';',
@@ -271,6 +333,11 @@ try {
     '  }',
     '  console.log("capability-probe-log");',
     '  void fetch("https://example.com/?probe=1").catch(function () {});',
+    'var frame = document.createElement("iframe");',
+    'frame.id = "probe-frame";',
+    'frame.style.cssText = "position:absolute;top:200px;left:40px;width:400px;height:200px;border:0";',
+    'frame.srcdoc = ' + JSON.stringify('<button id="inner-btn" style="width:200px;height:60px">inner target</button>') + ';',
+    'document.body.appendChild(frame);',
     '  return "ok";',
     '})()',
   ].join('\n');
@@ -279,19 +346,68 @@ try {
 
   // scroll: wheel by delta
   await call('scroll', { deltaY: 900, tabId: cap.tabId });
-  const scrolled = await call('eval', { tabId: cap.tabId, expression: 'String(Math.round(window.scrollY))' });
+  const scrolled = await call('eval', { tabId: cap.tabId, expression: 'Math.round(window.scrollY)' });
   check('a wheel scroll moves the page', Number(scrolled.result) > 100, scrolled);
 
   // scroll: bring a ref into view
   const capSnap = await call('snapshot', { tabId: cap.tabId });
   const boxRef = /\[ref=(\d+)\] (?:div|button)?\s*"box"/i.exec(capSnap.snapshot);
+  // A real assertion that always runs: the probe div is interactive (role=button),
+  // so a snapshot that does not list it is a broken snapshot, not a branch.
+  check('snapshot exposes a ref for the probe div', boxRef !== null, capSnap.snapshot.slice(0, 300));
   if (boxRef) {
     await call('scroll', { ref: Number(boxRef[1]), tabId: cap.tabId });
-    const inView = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify((function () { var el = document.getElementById("box"); if (!el) return null; var r = el.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; })())' });
+    const inView = await call('eval', { tabId: cap.tabId, expression: '(function () { var el = document.getElementById("box"); if (!el) return null; var r = el.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; })()' });
     check('scrolling to a ref brings it into view', String(inView.result) === 'true', inView);
-  } else {
-    check('snapshot exposes a ref for the probe div', false, capSnap.snapshot.slice(0, 300));
   }
+
+  // Content inside a frame is invisible to a main-frame-only snapshot.
+  await new Promise(r => setTimeout(r, 600));
+  const framed = await call('snapshot', { tabId: cap.tabId });
+  check('a snapshot reports a ref from inside an iframe',
+    /frame=f\d+\]/.test(framed.snapshot), framed.snapshot.slice(0, 400));
+  check('a snapshot still reports main-frame refs unchanged',
+    /\[ref=\d+\] (?!.*frame=)/.test(framed.snapshot), framed.snapshot.slice(0, 200));
+
+  // A main-frame ref is resolved in the page's own world, so walking child frames
+  // must not have moved the main frame's refs into an isolated world. Refs are
+  // per-snapshot, so the ref has to come from the snapshot just taken.
+  const mainRef = /^\[ref=(\d+)\] (?![^\n]*frame=)/m.exec(framed.snapshot);
+  check('a main-frame ref is still listed after a frame snapshot', mainRef !== null, framed.snapshot.slice(0, 300));
+  let mainRefError = null;
+  if (mainRef) {
+    try {
+      await call('scroll', { ref: Number(mainRef[1]), tabId: cap.tabId });
+    } catch (error) {
+      mainRefError = String(error.message);
+    }
+  }
+  check('a main-frame ref still resolves after a frame snapshot',
+    mainRef !== null && mainRefError === null, mainRefError);
+
+  // A ref inside a frame resolves in that frame's coordinates, which are not the
+  // page's. Clicking must apply the frame's offset.
+  const innerRef = /\[ref=(\d+) frame=(f\d+)\]/.exec(framed.snapshot);
+  if (innerRef) {
+    await call('eval', { tabId: cap.tabId, expression: '(function () { window.__hit = false; document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; }); return "ok"; })()' });
+    await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
+    const hit = await call('eval', { tabId: cap.tabId, expression: 'document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true' });
+    check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
+  } else {
+    check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
+  }
+
+  // page_text is deliberately main-frame only: its job is reading the article,
+  // and frame text is usually widget noise. Assert the decision, not just intend it.
+  const mainOnly = await call('pageText', { tabId: cap.tabId });
+  check('page_text stays on the main page by decision',
+    String(mainOnly.text).indexOf('inner target') === -1, String(mainOnly.text).slice(0, 200));
+
+  const framedFind = await call('find', { text: 'inner target', tabId: cap.tabId });
+  check('find reaches text that only exists inside a frame',
+    framedFind.count > 0, framedFind);
+  check('a match from a frame says which frame it came from',
+    framedFind.matches.some(m => /^\[f\d+\]/.test(m)), framedFind.matches);
 
   // A background tab gets no wheel event from the compositor, and Chrome never
   // acks the call. It must fall back quickly rather than burn the caller's
@@ -308,19 +424,19 @@ try {
   }
 
   await call('hover', { selector: '#b', tabId: cap.tabId });
-  const afterHover = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterHover = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('hover dispatches a move the page sees', String(afterHover.result).indexOf('mousemove') !== -1, afterHover);
 
   await call('click', { selector: '#b', clicks: 2, tabId: cap.tabId });
-  const afterDouble = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterDouble = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('a double click reaches detail 2', String(afterDouble.result).indexOf('dblclick:0:2') !== -1, afterDouble);
 
   await call('click', { selector: '#b', button: 'right', tabId: cap.tabId });
-  const afterRight = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterRight = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('a right click reaches button 2', String(afterRight.result).indexOf('contextmenu:2') !== -1, afterRight);
 
   await call('drag', { fromSelector: '#box', toSelector: '#f', tabId: cap.tabId });
-  const ev = JSON.parse(String((await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' })).result));
+  const ev = JSON.parse(String((await call('eval', { tabId: cap.tabId, expression: 'window.__ev' })).result));
   const startAt = ev.indexOf('mousedown:0:1');
   const endAt = ev.lastIndexOf('mouseup:0:1');
   const movesBetween = startAt >= 0 && endAt > startAt && ev.slice(startAt, endAt).filter(k => k.indexOf('mousemove:0') === 0).length;
@@ -341,16 +457,24 @@ try {
   check('network captures the probe request', JSON.stringify(reqs.entries).indexOf('probe=1') !== -1, reqs.entries.slice(0, 4));
 
   await call('resize', { width: 420, height: 640, tabId: cap.tabId });
-  const sized = await call('eval', { tabId: cap.tabId, expression: 'String(window.innerWidth)' });
+  const sized = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
   check('resize changes the layout width', Number(sized.result) === 420, sized);
   await call('resize', { width: 0, height: 0, tabId: cap.tabId });
-  const cleared = await call('eval', { tabId: cap.tabId, expression: 'String(window.innerWidth)' });
+  // The renderer applies the cleared override asynchronously, so poll briefly
+  // rather than asserting on the first read. The check still fails if the width
+  // never leaves the override.
+  let cleared = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    cleared = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
+    if (Number(cleared.result) !== 420) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
   check('resize clears again', Number(cleared.result) !== 420, cleared);
 
   const uploadPath = join(tmpdir(), 'dsh-chrome-upload-probe.txt');
   await writeFile(uploadPath, 'probe');
   await call('upload', { files: [uploadPath], selector: '#f', tabId: cap.tabId });
-  const attached = await call('eval', { tabId: cap.tabId, expression: 'String(document.getElementById("f").files.length)' });
+  const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
 
   // Close every test tab, including litter from earlier runs.

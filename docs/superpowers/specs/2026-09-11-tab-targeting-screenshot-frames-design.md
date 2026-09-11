@@ -111,7 +111,10 @@ One guard, in the extension's `screenshot` command (`service-worker.js:1077`):
    `SCREENSHOT_BASE64_LIMIT = 2_000_000`, return it.
 2. Otherwise re-capture as JPEG, stepping CDP's `quality` parameter (0–100)
    through `90, 75, 60, 45, 30`, and return the first result that fits.
-3. If none fits, return the smallest produced.
+3. If none fits, return the smallest produced. If no JPEG was produced at all
+   (every attempt was refused or returned no data), keep the oversized PNG and
+   return it with `format: 'png'` — an oversized image is still usable, and
+   turning a size problem into a failure would be worse.
 4. The command returns `{ base64, format }` where `format` is `'png'` or
    `'jpeg'`.
 
@@ -126,13 +129,18 @@ honoured verbatim, because the caller asked for that exact path.
 
 ### Enumeration
 
-`Page.getFrameTree` walks the frame tree. Each frame (main frame included) gets an
-execution context from `Page.createIsolatedWorld({ frameId, worldName:
-'dsh-agent-snapshot' })`, and the existing snapshot expression is evaluated there
-with `Runtime.evaluate({ expression, contextId, returnByValue: true })`. An
-isolated world is used rather than the page's own context so a page that redefines
-globals cannot break the walk, and CDP is not subject to same-origin, so
-cross-origin frames work.
+`Page.getFrameTree` walks the frame tree. Each **child** frame gets an execution
+context from `Page.createIsolatedWorld({ frameId, worldName:
+'dsh-agent-snapshot' })`, and the snapshot expression is evaluated there with
+`Runtime.evaluate({ expression, contextId, returnByValue: true })`. The **main**
+frame is deliberately left in the page's own world instead: the snapshot parks its
+refs in `window.__dshChromeRefs`, and every ref consumer (click, type, scroll,
+hover, upload, drag) resolves them through the page's own context, so reading the
+main frame in an isolated world would leave every main-frame ref unreachable. That
+was a Critical fix during implementation, and this record matches the shipped
+code. An isolated world is used for child frames so a page that redefines globals
+cannot break the walk, and CDP is not subject to same-origin, so cross-origin
+frames work.
 
 At most **12 frames** are read; the rest are reported as
 `… N further frames not read`.
@@ -166,8 +174,28 @@ not the top-level page, and CDP mouse events take top-level viewport coordinates
 A ref from a frame therefore needs its offset accumulated up the tree: for each
 ancestor frame, `DOM.getFrameOwner({ frameId })` gives the frame's element, and
 `DOM.getBoxModel` gives that element's box in its own parent. Summing the chain
-yields the offset the click needs. `DOM.enable` is already on
-(`ensureAttached`, `service-worker.js:126`).
+yields the frame element's position in the top frame's **document** space.
+`DOM.getBoxModel` is scroll-unadjusted, so that sum is *not* yet viewport space:
+the top frame's own `window.scrollX`/`window.scrollY` is subtracted once per
+resolution (`framePointToViewport`) before the point is dispatched. Only the top
+frame's scroll applies at any nesting depth — each level's box is already in its
+parent's document space, and the deepest point comes from
+`getBoundingClientRect`, so the frames between cancel out. Reading the sum as
+viewport space is correct only while the top page is unscrolled, and that
+assumption was the bug. `DOM.enable` is already on (`ensureAttached`,
+`service-worker.js:126`).
+
+The frame element can itself be scrolled out of the top page's viewport.
+`scrollIntoView` inside the frame scrolls the frame's own content, never the
+frame element in the top page, so each ancestor frame is resolved to a JS object
+(`DOM.resolveNode`) and scrolled with `scrollIntoView` — outermost first, so an
+inner frame is only scrolled once the frame that holds it is visible. Because
+the box quads are scroll-unadjusted, which ancestor is in view does not change
+them; the scroll is what makes the final viewport point land on screen. Resolving
+or scrolling an owner that fails throws rather than being swallowed: a frame that
+cannot be brought into view must refuse, never dispatch. `DOM.scrollIntoViewIfNeeded`
+was tried first and silently no-oped on a frame owner, which is how the frame
+stayed off-screen while the click was dispatched anyway.
 
 If any offset in the chain cannot be determined (the frame's owner element is
 `display: none`, or an ancestor has no box model), the command **fails with a
@@ -220,8 +248,9 @@ directly, so there is one implementation and no `chrome.*` dependency:
   parent's key, and the total reported even when the list is capped.
 - `normaliseFrameKey`: absent, `''`, `null` and `f0` all mean the main frame;
   `f1` and `f12` pass; `1`, `fx` and `f0a` are rejected.
-- the quality ladder: given an oversize PNG it picks the first JPEG that fits, and
-  the smallest when none fits.
+- the quality ladder: `nextJpegQuality` walks down and stops; `chooseJpegAttempt`
+  picks the first JPEG that fits (even when a later one is smaller), the smallest
+  when none fits, and null when every attempt produced nothing.
 - the confinement predicate: an agent-group tab passes, a foreign tab is refused,
   and `confineToAgentTabs: false` admits both.
 
@@ -250,7 +279,7 @@ suite without a test-only command, which is not worth adding.
 | `extension/service-worker.js` | `importScripts`; `resolveTabId` rewrite; `currentTabId` state; confinement check; screenshot format and guard; frame enumeration, ref parsing, offset accumulation; `find` fan-out |
 | `extension/options.html`, `extension/options.js` | the `confineToAgentTabs` toggle |
 | `src/index.ts` | `tabId` descriptions; `chrome_tabs` `agent` flag; screenshot format to file extension |
-| `test/bridge.test.mjs` | hermetic tests for the pure helpers |
+| `test/pure.test.mjs` | hermetic tests for the pure helpers |
 | `test/live-extension.mjs` | the live checks above |
 | `README.md` | the new default, the setting, the SSH tunnel recipe |
 
@@ -268,9 +297,11 @@ suite without a test-only command, which is not worth adding.
 
 ## Risks and limits
 
-- Clicking a ref inside a frame depends on `DOM.getFrameOwner` and
-  `DOM.getBoxModel` succeeding for every ancestor; when they do not, the click is
-  refused rather than approximated.
+- Clicking a ref inside a frame depends on `DOM.getFrameOwner`, `DOM.resolveNode`
+  and `DOM.getBoxModel` succeeding for every ancestor, and on the owner scrolling
+  into view; when they do not, the click is refused rather than approximated. The
+  conversion from document space to viewport space needs the top frame's scroll —
+  a scrolled descendant tab with a still top frame is the case a test must cover.
 - The 12-frame cap means the very deepest content on a frame-heavy page is not
   read. Tree order makes what is skipped predictable.
 - `importScripts` keeps the service worker classic. Converting it to an ES module

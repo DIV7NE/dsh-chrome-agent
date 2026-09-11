@@ -45,6 +45,21 @@ globalThis.WebSocket = class {
 }
 globalThis.WebSocket.OPEN = 1
 
+// The worker is a classic MV3 service worker, so it loads pure.js with
+// importScripts. self has to be the global, because that is where pure.js
+// publishes DSH_PURE; and the shim has to really evaluate the script, because a
+// no-op would leave self.DSH_PURE undefined and the worker would die on the
+// missing constants instead of exercising what this probe is for. A worker's
+// importScripts resolves against its own directory, hence extension/ under ROOT.
+globalThis.self = globalThis
+globalThis.importScripts = (name) => {
+  new Function(readFileSync(ROOT + '/extension/' + name, 'utf8'))()
+}
+// new Function's top level is a function body, not the global scope. pure.js is
+// an IIFE and takes its globals as arguments, so it works here — but a future
+// top-level `var` in pure.js would land on the global object in Chrome and be
+// invisible inside this function. Revisit the shim if pure.js's shape changes.
+
 // --- execute the worker ---
 try {
   const source = readFileSync(ROOT + '/extension/service-worker.js', 'utf8')

@@ -309,18 +309,21 @@ async function waitFor(ms: number): Promise<number> {
   return bounded
 }
 
-/** Capture a PNG and write it to disk, returning where it landed. */
+/** Capture a screenshot and write it to disk, returning where it landed. */
 async function captureScreenshot(
   bridge: Bridge,
   args: { tabId?: number; savePath?: string },
 ): Promise<{ path: string; bytes: number }> {
-  const captured = await bridge.call<{ base64?: unknown }>('screenshot', { tabId: args.tabId })
+  const captured = await bridge.call<{ base64?: unknown; format?: unknown }>('screenshot', { tabId: args.tabId })
   const base64 = typeof captured?.base64 === 'string' ? captured.base64 : ''
   if (base64 === '') throw new Error('chrome-agent: the extension returned no image data')
   const bytes = Buffer.from(base64, 'base64')
+  // The extension re-encodes an oversized capture as JPEG; writing JPEG bytes
+  // into a .png would hand the reader a file that lies about itself.
+  const extension = captured?.format === 'jpeg' ? '.jpg' : '.png'
   const path = typeof args.savePath === 'string' && args.savePath !== ''
     ? args.savePath
-    : join(tmpdir(), 'dsh-chrome-' + randomUUID() + '.png')
+    : join(tmpdir(), 'dsh-chrome-' + randomUUID() + extension)
   await writeFile(path, bytes)
   return { path, bytes: bytes.byteLength }
 }
@@ -371,7 +374,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_tabs',
     description:
       'List the tabs open in the user\'s Chrome: id, title, url, and which is active. '
-      + 'Use a returned id as `tabId` for the other chrome_* tools; omit `tabId` to act on the active tab.',
+      + 'Use a returned id as `tabId` for the other chrome_* tools; omit `tabId` to act on the tab the agent is working in.',
     parameters: {},
     output: {
       schema: {
@@ -385,14 +388,15 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
             url: { type: 'string', required: true },
             active: { type: 'boolean', required: true },
             groupId: { type: 'integer', required: true, description: 'Tab group id, or -1 when the tab is ungrouped. Agent-opened tabs share one group.' },
+            agent: { type: 'boolean', required: true, description: 'True when the agent opened this tab — it is in the agent\'s own group.' },
           },
         },
       },
-      render: textRender<Array<{ id: number; title: string; url: string; active: boolean; groupId: number }>>(tabs =>
-        bullet(tabs.map(t => (t.active ? '* ' : '  ') + t.id + '  ' + t.title + '  ' + t.url + (t.groupId === -1 ? '' : '  [group ' + t.groupId + ']'))),
+      render: textRender<Array<{ id: number; title: string; url: string; active: boolean; groupId: number; agent: boolean }>>(tabs =>
+        bullet(tabs.map(t => (t.active ? '* ' : '  ') + t.id + '  ' + t.title + '  ' + t.url + (t.groupId === -1 ? '' : '  [group ' + t.groupId + ']') + (t.agent ? '  [agent]' : ''))),
       ),
     },
-    execute: async () => bridge.call<Array<{ id: number; title: string; url: string; active: boolean; groupId: number }>>('tabs'),
+    execute: async () => bridge.call<Array<{ id: number; title: string; url: string; active: boolean; groupId: number; agent: boolean }>>('tabs'),
   }))
 
   register(defineTool({
@@ -400,11 +404,12 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Navigate a Chrome tab to a URL. Set `newTab` to open a fresh tab in the agent\'s own group — '
       + 'prefer that, or pass a `tabId` for a tab you already opened, so you never navigate a tab the '
-      + 'user is reading. Without either, this navigates whatever tab the user has active. '
+      + 'user is reading. Without either, this navigates the tab the agent is working in. '
+      + 'Opening a tab also makes it the tab later calls act on by default. '
       + 'This is the user\'s real browser, already signed in.',
     parameters: {
       url: { type: 'string', required: true, description: 'Absolute http(s) URL to open.' },
-      tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
       newTab: { type: 'boolean', description: 'Open a new tab instead of reusing one.' },
     },
     output: {
@@ -432,9 +437,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Read the page as a compact text tree of interactive elements, each annotated with a ref like [ref=7]. '
       + 'This is the primary way to see a page — read the snapshot, then pass a ref to chrome_click or chrome_type. '
-      + 'Cheaper and more reliable than a screenshot for anything but layout and images.',
+      + 'Cheaper and more reliable than a screenshot for anything but layout and images. '
+      + 'A ref from inside a frame is written [ref=7 frame=f1] and must be passed back with frame: "f1"; '
+      + 'chrome_page_text stays main-page only.',
     parameters: {
-      tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -457,7 +464,9 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_click',
     description:
       'Click an element. Prefer `ref` from the latest chrome_snapshot. Use `selector` for a CSS selector, '
-      + 'or `x`/`y` for raw viewport coordinates. Dispatches trusted input events at the element\'s centre.',
+      + 'or `x`/`y` for raw viewport coordinates. Dispatches trusted input events at the element\'s centre. '
+      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
+      + 'for the moment it acts, moving the user\'s view there.',
     parameters: {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot (e.g. 7).' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
@@ -465,7 +474,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y: { type: 'integer', description: 'Viewport y, with x, for a coordinate click.' },
       button: { type: 'string', description: 'Which button: left (default), right, or middle.' },
       clicks: { type: 'integer', description: '1 (default), 2 for a double click, or 3 for a triple click.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -484,6 +497,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y?: number
       button?: string
       clicks?: number
+      frame?: string
       tabId?: number
     }, exec) => {
       exec.signal.throwIfAborted()
@@ -501,7 +515,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot; focused when omitted.' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
       submit: { type: 'boolean', description: 'Press Enter after typing.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -513,7 +531,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.',
       ),
     },
-    execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; tabId?: number }, exec) => {
+    execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('type', args)
     },
@@ -524,11 +542,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Press a single key or chord on the page, e.g. "Enter", "Escape", "PageDown", "Control+a". '
       + 'Use chrome_type for text and this for navigation and shortcuts. '
-      + 'Chrome drops key events on tabs that are not visible, so this is the one action that '
-      + 'brings its tab to the front; every other tool works without moving the user\'s view.',
+      + 'Chrome drops key events on tabs that are not visible, so this brings the agent\'s tab '
+      + 'to the front for the moment it acts, moving the user\'s view there.',
     parameters: {
       key: { type: 'string', required: true, description: 'Key or chord, e.g. "Tab", "Control+Enter".' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -548,7 +566,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       + '(JSON, or a description for host objects). Use it to read data the snapshot does not surface.',
     parameters: {
       expression: { type: 'string', required: true, description: 'A JavaScript expression. Wrap multi-statement work in an IIFE.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -588,11 +606,12 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_screenshot',
     description:
-      'Capture a PNG of the visible area of a tab and save it to disk, returning the file path. '
+      'Capture the visible area of a tab and save it to disk, returning the file path. '
+      + 'The file is a PNG, or a JPEG when the capture is very large. '
       + 'Use it for layout, images, canvas, or when the text snapshot is not enough; read the returned path with the image reader.',
     parameters: {
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
-      savePath: { type: 'string', description: 'Absolute path to write the PNG to. Defaults to a temp file.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      savePath: { type: 'string', description: 'Absolute path to write the screenshot to. Defaults to a temp file.' },
     },
     output: {
       schema: {
@@ -604,7 +623,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         },
       },
       render: textRender<{ path: string; bytes: number }>(v =>
-        'Saved a ' + v.bytes + '-byte PNG screenshot to ' + v.path + '.',
+        'Saved a ' + v.bytes + '-byte screenshot to ' + v.path + '.',
       ),
     },
     execute: async (args: { tabId?: number; savePath?: string }, exec) => {
@@ -616,13 +635,19 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_hover',
     description:
-      'Move the pointer over an element without clicking. Use it to open hover menus and tooltips, or to make a page reveal controls before you click them.',
+      'Move the pointer over an element without clicking. Use it to open hover menus and tooltips, or to make a page reveal controls before you click them. '
+      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
+      + 'for the moment it acts, moving the user\'s view there.',
     parameters: {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot.' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
       x: { type: 'integer', description: 'Viewport x, with y.' },
       y: { type: 'integer', description: 'Viewport y, with x.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -632,7 +657,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ hovered: string }>(v => 'Hovering ' + v.hovered + '.'),
     },
-    execute: async (args: { ref?: number; selector?: string; x?: number; y?: number; tabId?: number }, exec) => {
+    execute: async (args: { ref?: number; selector?: string; x?: number; y?: number; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ hovered: string }>('hover', args)
     },
@@ -641,7 +666,9 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_drag',
     description:
-      'Drag from one point to another, e.g. a slider, a sortable row, or a canvas handle. Give each end as a snapshot ref, a CSS selector, or x+y coordinates. This drives mouse events, so it does not move native HTML5 drag-and-drop payloads (file drops, native reordering).',
+      'Drag from one point to another, e.g. a slider, a sortable row, or a canvas handle. Give each end as a snapshot ref, a CSS selector, or x+y coordinates. This drives mouse events, so it does not move native HTML5 drag-and-drop payloads (file drops, native reordering). '
+      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
+      + 'for the moment it acts, moving the user\'s view there.',
     parameters: {
       fromRef: { type: 'integer', description: 'Start element ref from chrome_snapshot.' },
       fromSelector: { type: 'string', description: 'Start CSS selector.' },
@@ -651,7 +678,15 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       toSelector: { type: 'string', description: 'End CSS selector.' },
       toX: { type: 'integer', description: 'End viewport x.' },
       toY: { type: 'integer', description: 'End viewport y.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      fromFrame: {
+        type: 'string',
+        description: 'Frame the fromRef belongs to, as chrome_snapshot writes it. Omit for the main page.',
+      },
+      toFrame: {
+        type: 'string',
+        description: 'Frame the toRef belongs to, as chrome_snapshot writes it. Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -676,7 +711,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       selector: { type: 'string', description: 'CSS selector to scroll into view.' },
       deltaY: { type: 'integer', description: 'Pixels to scroll vertically when there is no target.' },
       deltaX: { type: 'integer', description: 'Pixels to scroll horizontally when there is no target.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -686,7 +725,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ scrolled: string }>(v => 'Scrolled ' + v.scrolled + '.'),
     },
-    execute: async (args: { ref?: number; selector?: string; deltaY?: number; deltaX?: number; tabId?: number }, exec) => {
+    execute: async (args: { ref?: number; selector?: string; deltaY?: number; deltaX?: number; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ scrolled: string }>('scroll', args)
     },
@@ -718,7 +757,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Read the page as prose, preferring the article body over the whole document. Cheaper than a snapshot when you want to read or summarise rather than interact — navigation, banners and footers are dropped.',
     parameters: {
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -743,7 +782,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       'Look for a string in the text the page is showing, and scroll the first hit into view. Returns how many times it appears and a short quote around each of the first few. Use it to locate something on a long page instead of reading the whole snapshot.',
     parameters: {
       text: { type: 'string', required: true, description: 'The text to look for (case-insensitive).' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -752,13 +791,21 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         properties: {
           count: { type: 'integer', required: true },
           matches: { type: 'array', required: true, items: { type: 'string' } },
+          skipped: { type: 'integer', required: true, description: 'Frames the 12-frame cap left unread.' },
+          unread: { type: 'array', required: true, items: { type: 'string' }, description: 'Frame keys that were in range but could not be read.' },
         },
       },
-      render: textRender<{ count: number; matches: string[] }>(v => v.count === 0
-        ? 'No matches.'
-        : v.count + ' match(es):\n' + v.matches.map(m => '  …' + m + '…').join('\n')),
+      render: textRender<{ count: number; matches: string[]; skipped: number; unread: string[] }>(v => {
+        const head = v.count === 0
+          ? 'No matches.'
+          : v.count + ' match(es):\n' + v.matches.map(m => '  …' + m + '…').join('\n')
+        const notes: string[] = []
+        if (v.skipped > 0) notes.push(v.skipped + ' further frame(s) not read')
+        if (v.unread.length > 0) notes.push(v.unread.length + ' frame(s) could not be read (' + v.unread.join(', ') + ')')
+        return notes.length === 0 ? head : head + '\n\n… ' + notes.join('; ')
+      }),
     },
-    execute: async (args: { text: string; tabId?: number }) => bridge.call<{ count: number; matches: string[] }>('find', args),
+    execute: async (args: { text: string; tabId?: number }) => bridge.call<{ count: number; matches: string[]; skipped: number; unread: string[] }>('find', args),
   }))
 
   register(defineTool({
@@ -767,7 +814,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       'Read the console messages and uncaught exceptions a tab has produced since you last read them (pass keep to read without clearing). Use it when a page misbehaves after an action.',
     parameters: {
       keep: { type: 'boolean', description: 'Read without clearing the buffer.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -801,7 +848,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       'Read the HTTP requests a tab made since you last read them (pass keep to read without clearing), with the response status where one was seen. Use it to find the API behind a page, or to see what a click actually triggered.',
     parameters: {
       keep: { type: 'boolean', description: 'Read without clearing the buffer.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -840,7 +887,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       height: { type: 'integer', required: true, description: 'Viewport height in CSS pixels, or 0 to clear.' },
       scale: { type: 'number', description: 'Device scale factor; 0 leaves it alone.' },
       mobile: { type: 'boolean', description: 'Emulate a mobile device.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -869,7 +916,11 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       ref: { type: 'integer', description: 'The input[type=file] ref from chrome_snapshot.' },
       selector: { type: 'string', description: 'CSS selector for the input.' },
-      tabId: { type: 'integer', description: 'Target tab id. Defaults to the active tab.' },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
     output: {
       schema: {
@@ -879,7 +930,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ uploaded: number }>(v => 'Attached ' + v.uploaded + ' file(s).'),
     },
-    execute: async (args: { files: string[]; ref?: number; selector?: string; tabId?: number }, exec) => {
+    execute: async (args: { files: string[]; ref?: number; selector?: string; frame?: string; tabId?: number }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ uploaded: number }>('upload', args)
     },

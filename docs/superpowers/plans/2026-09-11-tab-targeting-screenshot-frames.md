@@ -35,6 +35,8 @@
 | `extension/options.html`, `extension/options.js` (modify) | The `confineToAgentTabs` toggle. |
 | `src/index.ts` (modify) | `tabId` descriptions, `frame` parameters, the `agent` flag, screenshot format to file extension. |
 | `test/pure.test.mjs` (create) | Hermetic tests for `pure.js`. |
+| `test/probe-worker.mjs` (existing) | The classic-parse gate for the worker: runs its registration-time code against Chrome API stubs. |
+| `test/probe-eval-contract.mjs` (existing) | Mirrors the `eval` wrapper and checks each live-suite expression against a correct and a wrong page state. |
 | `test/live-extension.mjs` (modify) | Live acceptance checks. |
 | `README.md` (modify) | The new default, the setting, the SSH tunnel recipe. |
 
@@ -81,24 +83,32 @@ const {
   sumFrameOffsets,
 } = globalThis.DSH_PURE
 
-/** A frame tree shaped like Page.getFrameTree's. */
-function tree(...childLists) {
-  const node = (id, children) => ({ frame: { id, url: 'https://x/' + id }, childFrames: children })
-  return node('root', childLists.map((kids, i) => node('c' + i, kids)))
-}
+/** A frame tree node shaped like Page.getFrameTree's. A leaf omits childFrames. */
+const frame = (id, childFrames) => (childFrames === undefined
+  ? { frame: { id, url: 'https://x/' + id } }
+  : { frame: { id, url: 'https://x/' + id }, childFrames })
+
+// root
+//   c0
+//   c1
+//     g0
+//     g1
+const sample = () => frame('root', [frame('c0'), frame('c1', [frame('g0'), frame('g1')])])
 
 test('a frame tree flattens main-first with parent keys', () => {
-  const flat = flattenFrameTree(tree(['g0', 'g1']), FRAME_LIMIT)
-  assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1', 'f2', 'f3'])
-  assert.deepEqual(flat.frames.map(f => f.parentKey), [null, 'f0', 'f0', 'f1'])
-  assert.equal(flat.total, 4)
+  const flat = flattenFrameTree(sample(), FRAME_LIMIT)
+  assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1', 'f2', 'f3', 'f4'])
+  assert.deepEqual(flat.frames.map(f => f.parentKey), [null, 'f0', 'f0', 'f2', 'f2'])
+  assert.deepEqual(flat.frames.map(f => f.frameId), ['root', 'c0', 'c1', 'g0', 'g1'])
+  assert.equal(flat.total, 5)
 })
 
 test('flattening caps the list but still counts every frame', () => {
-  const flat = flattenFrameTree(tree(['g0', 'g1']), 2)
+  const flat = flattenFrameTree(sample(), 2)
   assert.equal(flat.frames.length, 2)
-  assert.equal(flat.total, 4)
-  // Keys are assigned before the cap, so a returned key always means the same frame.
+  assert.equal(flat.total, 5)
+  // Keys are assigned before the cap, so a returned key always means the same
+  // frame — f2 still names c1 even though it is not in the list.
   assert.deepEqual(flat.frames.map(f => f.key), ['f0', 'f1'])
 })
 
@@ -521,8 +531,9 @@ git commit -m "fix: target the agent's own tab instead of the user's active tab"
 ### Task 3: Confinement, and telling the agent's tabs from the user's
 
 **Files:**
-- Modify: `extension/service-worker.js` — a new `assertTabAllowed`, `resolveTabId`, `withGroup` (line 752)
+- Modify: `extension/service-worker.js` — a new `assertTabAllowed`, `resolveTabId`, `withGroup` (line 752), and the `close` command
 - Modify: `extension/options.html`, `extension/options.js`
+- Modify: `src/index.ts` — declare the `agent` field in `chrome_tabs`'s output schema and render. Without it the host rejects every call, because dsh-tools validates tool output against `additionalProperties: false`. (Added by controller ruling after implementation: the original file list omitted this and the command would have failed at runtime.)
 - Modify: `test/live-extension.mjs`
 
 **Interfaces:**
@@ -541,7 +552,12 @@ const listing = await call('tabs');
 const own = listing.filter(t => t.id === ownTab.tabId)[0];
 const others = listing.filter(t => t.id !== ownTab.tabId);
 check('a tab the agent opened is reported as its own', own && own.agent === true, own);
-check('a tab the agent did not open is not', others.length > 0 && others.every(t => t.agent === false), others.slice(0, 3));
+// Membership is decided by group, not by "is it my tab": by this point the suite has
+// already opened and left open several agent tabs, so an others.every(agent === false)
+// check fails. Anything outside the agent's group is the user's.
+const foreign = listing.filter(t => t.groupId !== own.groupId);
+check('a tab outside the agent group is not marked as the agent\'s',
+  foreign.length > 0 && foreign.every(t => t.agent === false), foreign.slice(0, 3));
 await call('close', { tabId: ownTab.tabId });
 ```
 
@@ -576,6 +592,18 @@ async function assertTabAllowed(tabId) {
     + 'Tools can only target tabs inside the group; call chrome_tabs to list the tabs the agent may use.');
 }
 ```
+
+Then confine `close` as well. It reads `params.tabId` directly rather than going
+through `resolveTabId`, so without this the agent can close one of the user's tabs while
+`confineToAgentTabs` is on — and closing a tab is destructive and irreversible. After its
+`tabId === null` check and before `attached.delete(tabId)`, add:
+
+```js
+    await assertTabAllowed(tabId);
+```
+
+Do not give `close` a default target by routing it through `resolveTabId`; requiring an
+explicit id is correct for a destructive command.
 
 Then in `resolveTabId`, add the check on both paths:
 
@@ -687,7 +715,9 @@ git commit -m "feat: optional confinement to the agent's tab group"
 In `test/live-extension.mjs`, after the existing `screenshot` check:
 
 ```js
-const shotInfo = await call('screenshot', { tabId: cap.tabId });
+// Use a tab that is in scope HERE. cap is declared much later in the suite, so the
+// original snippet's cap.tabId would be a ReferenceError at this anchor.
+const shotInfo = await call('screenshot', { tabId: opened.tabId });
 check('a screenshot reports the format it was encoded in',
   shotInfo.format === 'png' || shotInfo.format === 'jpeg', shotInfo.format);
 ```
@@ -716,10 +746,10 @@ In `extension/service-worker.js`, replace the body of `screenshot` (lines 1077-1
     if (last) await paintCursor(tabId, last.x, last.y);
     return shot;
   },
-};```
+};
 ```
+
 // (the trailing `};` closes the COMMANDS table — keep whatever closes it today)
-```
 
 Then add these two helpers above `const COMMANDS`:
 
@@ -911,8 +941,14 @@ Replace the `snapshot` command (lines 818-828) with:
     let text = '';
     for (let index = 0; index < flat.frames.length; index += 1) {
       const frame = flat.frames[index];
-      const contextId = await frameContext(tabId, frame.frameId);
-      const raw = await evaluateIn(tabId, contextId, SNAPSHOT_EXPRESSION);
+      // The MAIN frame stays in the page's own world. Every ref consumer already
+      // looks for window.__dshChromeRefs there, and an isolated world has its own
+      // global, so running f0 isolated would leave every main-frame ref
+      // unresolvable. Child frames, which no consumer could reach before, get an
+      // isolated world the page cannot see or shadow.
+      const raw = frame.key === 'f0'
+        ? await evaluate(tabId, SNAPSHOT_EXPRESSION)
+        : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), SNAPSHOT_EXPRESSION);
       if (typeof raw !== 'string') continue;
       const parsed = JSON.parse(raw);
       const isMain = frame.key === 'f0';
@@ -988,9 +1024,14 @@ In `test/live-extension.mjs`, after the frame snapshot checks:
 // page's. Clicking must apply the frame's offset.
 const innerRef = /\[ref=(\d+) frame=(f\d+)\]/.exec(framed.snapshot);
 if (innerRef) {
-  await call('eval', { tabId: cap.tabId, expression: 'window.__hit = false; document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; })' });
+  // chrome_eval wraps its input as \`var value = (<expr>);\`, so this must be ONE
+// expression — a statement list is a syntax error.
+await call('eval', { tabId: cap.tabId, expression: '(function () { document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; }); return "ok"; })()' });
   await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
-  const hit = await call('eval', { tabId: cap.tabId, expression: 'String(document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true)' });
+  // No String(...) here: the eval command already JSON-stringifies, so a boolean
+  // arrives as "true". Pre-serializing would deliver '"true"' and the check
+  // below could never pass.
+  const hit = await call('eval', { tabId: cap.tabId, expression: 'document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true' });
   check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
 } else {
   check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
@@ -1064,6 +1105,11 @@ async function frameFor(tabId, frameKey) {
 
 /** Evaluate an expression inside the named frame; the empty key is the main frame. */
 async function evaluateInFrame(tabId, frameKey, expression) {
+  // The main frame is evaluated in the page's own world, which is where the
+  // snapshot wrote its refs and where every existing ref consumer looks. Only a
+  // child frame uses an isolated world. This is the single place the choice is
+  // made, so click, hover, type, scroll, upload and drag all inherit it.
+  if (frameKey === '') return evaluate(tabId, expression);
   const found = await frameFor(tabId, frameKey);
   const contextId = await frameContext(tabId, found.frame.frameId);
   return evaluateIn(tabId, contextId, expression);
@@ -1080,8 +1126,10 @@ async function evaluateInFrame(tabId, frameKey, expression) {
 async function resolvePoint(tabId, params, prefix) {
   const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
   const found = await frameFor(tabId, frameKey);
-  const contextId = await frameContext(tabId, found.frame.frameId);
-  const point = await evaluateIn(tabId, contextId, pointExpressionFor(params, prefix));
+  // No frameContext call here: evaluateInFrame resolves the context itself, and a
+  // spare one would mint a throwaway isolated world on every click, hover, drag,
+  // type and scroll.
+  const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
   if (frameKey === '') return point;
   const offset = await frameOffsetFor(tabId, found.frames, frameKey);
@@ -1163,8 +1211,12 @@ one needs the context rather than a value. Replace:
 with:
 
 ```js
-    const uploadFrame = await frameFor(tabId, normaliseFrameKey(params.frame));
-    const uploadContext = await frameContext(tabId, uploadFrame.frame.frameId);
+    const uploadFrameKey = normaliseFrameKey(params.frame);
+    const uploadFrame = await frameFor(tabId, uploadFrameKey);
+    // undefined context means the page's own world, matching evaluateInFrame.
+    const uploadContext = uploadFrameKey === ''
+      ? undefined
+      : await frameContext(tabId, uploadFrame.frame.frameId);
     const objectId = await evaluateHandle(tabId, uploadContext, uploadTargetExpression(params));
 ```
 
@@ -1373,9 +1425,15 @@ npx tsc --noEmit                       # exit 0
 node --check extension/service-worker.js
 node --check extension/options.js
 node --check extension/pure.js
-npm test                               # 0 failures, including the new pure tests
+npm test                               # 0 failures: pure tests plus the eval-contract probe
 npm run install:profile                # repack and install into the web profile
 ```
+
+`package.json` sets `"type": "module"`, so `node --check extension/service-worker.js`
+parses the worker under ESM rules even though Chrome loads it as a classic script;
+it is a cheap smoke check, not the real gate. The real classic-parse gate is
+`node test/probe-worker.mjs <repo root>`: it evaluates the worker as a sloppy-mode
+script through a real `importScripts` shim, which is the shape Chrome uses.
 
 Then reload the extension, restart the DSH server, point the extension's options port at the test port, and run:
 

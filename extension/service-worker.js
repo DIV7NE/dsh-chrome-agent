@@ -11,6 +11,20 @@
  * maintained rather than re-established per command. An alarm is the belt to
  * that brace — it retries when the socket drops or the worker was evicted.
  */
+importScripts('pure.js');
+
+/** The browser-free helpers, shared with the node test. */
+const PURE = self.DSH_PURE;
+const FRAME_LIMIT = PURE.FRAME_LIMIT;
+const SCREENSHOT_BASE64_LIMIT = PURE.SCREENSHOT_BASE64_LIMIT;
+const flattenFrameTree = PURE.flattenFrameTree;
+const normaliseFrameKey = PURE.normaliseFrameKey;
+const nextJpegQuality = PURE.nextJpegQuality;
+const chooseJpegAttempt = PURE.chooseJpegAttempt;
+const isTabAllowed = PURE.isTabAllowed;
+const pointInViewport = PURE.pointInViewport;
+const sumFrameOffsets = PURE.sumFrameOffsets;
+const framePointToViewport = PURE.framePointToViewport;
 
 const DEFAULT_PORT = 3080;
 const PROTOCOL_VERSION = 1;
@@ -22,6 +36,13 @@ let retryDelayMs = 3000;
 
 /** Every tab this worker currently holds a debugger attachment on. */
 const attached = new Set();
+
+/** The tab the agent is working in, and whether storage has been read yet. */
+let currentTabId = null;
+let currentTabLoaded = false;
+/** The in-flight session-storage read, shared by commands that overlap. */
+let currentTabLoad = null;
+const CURRENT_TAB_KEY = 'currentTabId';
 
 /** The DSH server port, from storage (the options page writes it). */
 async function serverPort() {
@@ -107,13 +128,114 @@ function describe(error) {
 
 // ---------------------------------------------------------------- tabs ---
 
-/** Resolve the tab a command acts on: the named one, else the active tab. */
+/**
+ * The tab the agent is working in, read from session storage once per worker.
+ *
+ * Session storage rather than memory alone because Chrome evicts an idle
+ * service worker, and losing the tab on every eviction would make every
+ * follow-up call fail for no reason the caller can see.
+ */
+async function readCurrentTabId() {
+  if (!currentTabLoaded) {
+    if (currentTabLoad === null) currentTabLoad = loadCurrentTabId();
+    // Commands are not serialised, so a second caller shares this one read
+    // rather than seeing a half-finished load and returning a null tab.
+    await currentTabLoad;
+  }
+  return currentTabId;
+}
+
+/**
+ * Run the stored-tab read once. Never throws, and never clobbers a tab that
+ * rememberTab recorded while this read was in flight.
+ */
+async function loadCurrentTabId() {
+  try {
+    const stored = await chrome.storage.session.get(CURRENT_TAB_KEY);
+    if (currentTabLoaded) return;
+    const storedId = stored[CURRENT_TAB_KEY];
+    if (typeof storedId !== 'number') return;
+    try {
+      // A tab can close while no worker is alive to hear about it, so a stored
+      // id is a claim to check, not a fact.
+      await chrome.tabs.get(storedId);
+      // A rememberTab can land during the await above; re-check so its tab is
+      // not overwritten by the stored one now that the read has finished.
+      if (currentTabLoaded) return;
+      currentTabId = storedId;
+    } catch (error) {
+      // This catch is part of the same read: a rememberTab can land during the
+      // chrome.tabs.get await above, and its newer claim must not be cleared
+      // just because the stored tab turned out to be gone.
+      if (currentTabLoaded) return;
+      currentTabId = null;
+      chrome.storage.session.remove(CURRENT_TAB_KEY).catch(() => {});
+    }
+  } catch (error) {
+    // Session storage is best effort; memory alone still works this session.
+  } finally {
+    currentTabLoaded = true;
+  }
+}
+
+/** Record the tab the agent is working in, in memory and for the next worker. */
+function rememberTab(tabId) {
+  currentTabId = tabId;
+  currentTabLoaded = true;
+  try {
+    chrome.storage.session.set({ [CURRENT_TAB_KEY]: tabId }).catch(() => {});
+  } catch (error) {
+    // Session storage is best effort; memory alone still works this session.
+  }
+}
+
+/**
+ * Refuse a tab the agent is not allowed to touch.
+ *
+ * The setting is read per call rather than cached so that flipping it in the
+ * options page takes effect on the next command, not the next worker.
+ */
+async function assertTabAllowed(tabId) {
+  const stored = await chrome.storage.local.get({ confineToAgentTabs: false });
+  // Fail closed like isTabAllowed: any truthy stored value confines, so a
+  // non-boolean '1' or 'true' cannot slip past this gate before the predicate.
+  if (!stored.confineToAgentTabs) return;
+  let tabGroupId = -1;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabGroupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
+  } catch (error) {
+    throw new Error('tab ' + tabId + ' is gone');
+  }
+  // The agent's own group has to be resolved rather than read off agentGroupId:
+  // an evicted worker comes back without it.
+  const ownGroupId = await agentGroup();
+  if (isTabAllowed(tabGroupId, ownGroupId, true)) return;
+  throw new Error('Tab ' + tabId + " is not in the agent's tab group for this session. "
+    + 'Tools can only target tabs inside the group; call chrome_tabs to list the tabs the agent may use.');
+}
+
+/**
+ * Resolve the tab a command acts on: the named one, else the tab the agent is
+ * already working in.
+ *
+ * There is deliberately no "the user's active tab" fallback. Guessing there
+ * means a command sent without a tabId can act on whatever the user happens to
+ * be looking at; failing loudly is the safe answer, and passing a tabId is how a
+ * caller reaches a tab the agent did not open.
+ */
 async function resolveTabId(tabId) {
-  if (typeof tabId === 'number') return tabId;
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const active = tabs[0];
-  if (!active || typeof active.id !== 'number') throw new Error('no active tab to act on');
-  return active.id;
+  if (typeof tabId === 'number') {
+    await assertTabAllowed(tabId);
+    rememberTab(tabId);
+    return tabId;
+  }
+  const remembered = await readCurrentTabId();
+  if (remembered === null) {
+    throw new Error('no tab yet — call chrome_open first, or pass an explicit tabId');
+  }
+  await assertTabAllowed(remembered);
+  return remembered;
 }
 
 // ----------------------------------------------------------- debugger ---
@@ -249,6 +371,11 @@ chrome.tabs.onRemoved.addListener(tabId => {
   cursorAt.delete(tabId);
   consoleByTab.delete(tabId);
   networkByTab.delete(tabId);
+  if (currentTabId === tabId) {
+    currentTabId = null;
+    currentTabLoaded = true;
+    chrome.storage.session.remove(CURRENT_TAB_KEY).catch(() => {});
+  }
 });
 
 /** Send one CDP command on a tab. */
@@ -306,13 +433,17 @@ const CURSOR_HALO = 'rgba(122,162,247,0.50)';
  * DOM.setFileInputFiles addresses an element by objectId, not by value, so the
  * file input has to be evaluated with returnByValue off.
  */
-async function evaluateHandle(tabId, expression) {
-  const result = await cdp(tabId, 'Runtime.evaluate', {
+async function evaluateHandle(tabId, contextId, expression) {
+  const params = {
     expression: expression,
     returnByValue: false,
     awaitPromise: true,
     userGesture: true,
-  });
+  };
+  // The main frame has no contextId, so the key is omitted rather than set to
+  // undefined, which the protocol would read as a malformed context reference.
+  if (contextId !== undefined) params.contextId = contextId;
+  const result = await cdp(tabId, 'Runtime.evaluate', params);
   if (result && result.exceptionDetails) {
     const details = result.exceptionDetails;
     const thrown = details.exception && (details.exception.description || details.exception.value);
@@ -486,9 +617,200 @@ function pointExpressionFor(params, prefix) {
   ].join('\n');
 }
 
-/** The plain single-target resolver used by click, hover and type. */
-function pointExpression(params) {
-  return pointExpressionFor(params, '');
+/**
+ * Scroll a frame's owner element into view, in the document that holds it.
+ *
+ * `DOM.scrollIntoViewIfNeeded` looked like the right call, but for a frame
+ * owner it did nothing here and its errors were swallowed, so the frame stayed
+ * off-screen and the click was dispatched anyway. Resolve the owner to a JS
+ * object and scroll it with `scrollIntoView` — the same call the page-side
+ * resolver uses — and let any failure throw, so an unreachable frame refuses
+ * instead of silently clicking the wrong place.
+ */
+async function bringFrameIntoView(tabId, backendNodeId, frameKey) {
+  let objectId = null;
+  try {
+    const resolved = await cdp(tabId, 'DOM.resolveNode', { backendNodeId: backendNodeId });
+    objectId = resolved && resolved.object ? resolved.object.objectId : null;
+  } catch (error) {
+    throw new Error('cannot bring frame ' + frameKey + ' into view: '
+      + (error && error.message ? error.message : error));
+  }
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw new Error('cannot bring frame ' + frameKey + ' into view (its container is not a scriptable '
+      + 'element), so a click would land in the wrong place — pass x and y explicitly instead');
+  }
+  try {
+    await cdp(tabId, 'Runtime.callFunctionOn', {
+      objectId: objectId,
+      functionDeclaration: 'function () { this.scrollIntoView({ block: "center", inline: "center", '
+        + 'behavior: "instant" }); }',
+    });
+  } catch (error) {
+    throw new Error('cannot bring frame ' + frameKey + ' into view: '
+      + (error && error.message ? error.message : error));
+  }
+}
+
+/**
+ * Sum the offsets of a frame and every frame between it and the top.
+ *
+ * DOM.getFrameOwner names the element a frame is loaded in, and DOM.getBoxModel
+ * gives that element's box in its own parent. The quads are scroll-unadjusted,
+ * so the sum is the frame's position in the top frame's DOCUMENT space — not
+ * viewport space; `resolvePoint` applies the top frame's scroll before the
+ * point is dispatched.
+ *
+ * The frame element can itself be scrolled out of the top page's viewport.
+ * el.scrollIntoView inside pointExpressionFor scrolls the frame's own content,
+ * never the frame element, so each ancestor frame is brought into view first —
+ * outermost first, so an inner frame is only scrolled once the frame that holds
+ * it is visible. Because the box quads are scroll-unadjusted, which frame is in
+ * view does not change them; the scroll is what makes the final point land on
+ * screen.
+ *
+ * @returns the document-space offset, or throws: a wrong click is worse than a
+ *   refused one.
+ */
+async function frameOffsetFor(tabId, frames, frameKey) {
+  const byKey = {};
+  for (let i = 0; i < frames.length; i += 1) byKey[frames[i].key] = frames[i];
+  const chain = [];
+  for (let current = byKey[frameKey]; current && current.parentKey; current = byKey[current.parentKey]) {
+    chain.push(current);
+  }
+  const quads = [];
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const frame = chain[i];
+    let owner = null;
+    try {
+      owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: frame.frameId });
+    } catch (error) {
+      owner = null;
+    }
+    if (!owner || typeof owner.backendNodeId !== 'number') {
+      // A frame whose owner cannot be named cannot be measured or scrolled.
+      // Swallowing this was the bug: the frame stayed off-screen and the click
+      // was dispatched anyway.
+      throw new Error('cannot locate the element that holds frame ' + frame.key
+        + ' on the page, so a click would land in the wrong place — pass x and y explicitly instead');
+    }
+    await bringFrameIntoView(tabId, owner.backendNodeId, frame.key);
+    let box = null;
+    try {
+      box = await cdp(tabId, 'DOM.getBoxModel', { backendNodeId: owner.backendNodeId });
+    } catch (error) {
+      box = null;
+    }
+    const border = box && box.model ? box.model.border : null;
+    if (!Array.isArray(border)) {
+      throw new Error('cannot place frame ' + frame.key + ' on the page (its container has no box), '
+        + 'so a click would land in the wrong place — pass x and y explicitly instead');
+    }
+    quads.push(border);
+  }
+  const sum = sumFrameOffsets(quads);
+  if (sum === null) {
+    throw new Error('cannot place frame ' + frameKey + ' on the page, so a click would land in the '
+      + 'wrong place — pass x and y explicitly instead');
+  }
+  return sum;
+}
+
+/** One frame, by its key; the empty key means the main frame. */
+async function frameFor(tabId, frameKey) {
+  const flat = await framesFor(tabId);
+  const wanted = frameKey === '' ? 'f0' : frameKey;
+  for (let i = 0; i < flat.frames.length; i += 1) {
+    if (flat.frames[i].key === wanted) return { frame: flat.frames[i], frames: flat.frames };
+  }
+  throw new Error('no frame ' + wanted + ' on this page — take a fresh chrome_snapshot');
+}
+
+/** Evaluate an expression inside the named frame; the empty key is the main frame. */
+async function evaluateInFrame(tabId, frameKey, expression) {
+  // The main frame is evaluated in the page's own world, which is where the
+  // snapshot wrote its refs and where every existing ref consumer looks. Only a
+  // child frame uses an isolated world. This is the single place the choice is
+  // made, so click, hover, type, scroll, upload and drag all inherit it.
+  if (frameKey === '') return evaluate(tabId, expression);
+  const found = await frameFor(tabId, frameKey);
+  const contextId = await frameContext(tabId, found.frame.frameId);
+  return evaluateIn(tabId, contextId, expression);
+}
+
+
+/**
+ * Refuse to dispatch input at a point outside the tab's viewport.
+ *
+ * CDP accepts any coordinate, but a mouse event outside the viewport reaches
+ * nothing, so a command that returned success would be lying: the agent would
+ * believe it acted. Called with every point about to be dispatched, however it
+ * was obtained (resolved ref, frame offset or explicit coordinates), before the
+ * view is moved. A point exactly on the edge is inside.
+ */
+async function assertInViewport(tabId, points) {
+  const size = await evaluate(tabId, '({ width: window.innerWidth, height: window.innerHeight })');
+  const width = size ? size.width : null;
+  const height = size ? size.height : null;
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    if (pointInViewport(point.x, point.y, width, height)) continue;
+    throw new Error('target ' + (point.label ? JSON.stringify(point.label) + ' ' : '')
+      + 'at ' + Math.round(point.x) + ',' + Math.round(point.y) + ' is outside the viewport '
+      + '(' + Math.round(width) + 'x' + Math.round(height) + '), so input there would be dropped — '
+      + 'scroll it into view first, or pass coordinates inside the viewport');
+  }
+}
+
+/**
+ * Resolve a click, hover, type, scroll or upload target to top-level viewport
+ * coordinates.
+ *
+ * @param params - the command's arguments.
+ * @param prefix - '', 'from' or 'to', naming the argument group.
+ * @returns the point, or null when the target does not exist.
+ */
+async function resolvePoint(tabId, params, prefix) {
+  const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
+  // The main frame needs no frame tree: its point is already in the page's own
+  // coordinates, so only a child frame has a parent-tree offset to walk.
+  const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
+  if (!point) return null;
+  if (frameKey === '') return point;
+  const found = await frameFor(tabId, frameKey);
+  const offset = await frameOffsetFor(tabId, found.frames, frameKey);
+  // The offset is document space; CDP input is viewport space. Subtract the top
+  // frame's scroll — read once, after the frame has been scrolled into view —
+  // or a scrolled page silently clicks the wrong place.
+  const scroll = await evaluate(tabId, '({ x: window.scrollX, y: window.scrollY })');
+  const placed = framePointToViewport(point, offset, scroll);
+  if (placed === null) {
+    throw new Error('cannot read the page scroll, so frame ' + frameKey + ' cannot be placed — '
+      + 'pass x and y explicitly instead');
+  }
+  return { x: placed.x, y: placed.y, label: point.label };
+}
+
+/**
+ * Resolve a target on the page as it will be when the input is dispatched.
+ *
+ * `resolvePoint` reads the page while the tab may still be in the background. A
+ * background tab that has had `scrollIntoView` applied but has never been shown
+ * has not committed that scroll, so when `ensureVisible` brings it forward the
+ * page settles back to its committed offset and a point resolved before the
+ * activation is stale. Measured on the frame fixture: the frame was scrolled
+ * into view, then the page snapped 900px the other way before the mouse events
+ * went out, and the click reported success without landing. Re-reading after
+ * activation is what makes the dispatched point match the page.
+ *
+ * The caller resolves and validates once before activation as well, because a
+ * command that is going to be refused must not move the user's view.
+ */
+async function resolveVisiblePoint(tabId, params, prefix) {
+  const point = await resolvePoint(tabId, params, prefix);
+  if (point) await assertInViewport(tabId, [{ x: point.x, y: point.y, label: point.label }]);
+  return point;
 }
 
 /** Page-side focus resolver for chrome_type. */
@@ -709,12 +1031,49 @@ const GROUP_TITLE = 'DSH Chrome Agent';
 const GROUP_COLOR = 'blue';
 let agentGroupId = null;
 
+/** Whether the title lookup has already run in this worker's life. */
+let agentGroupLookupDone = false;
+/** The in-flight title lookup, shared by commands that overlap. */
+let agentGroupLookup = null;
+
+/**
+ * The agent's tab group, found again after a worker restart.
+ *
+ * agentGroupId is in memory only, so an evicted worker comes back without it. The
+ * group itself outlives the worker and is the one wearing GROUP_TITLE, so it can be
+ * found rather than duplicated.
+ */
+async function agentGroup() {
+  if (agentGroupId !== null) return agentGroupId;
+  if (!agentGroupLookupDone) {
+    if (agentGroupLookup === null) agentGroupLookup = findAgentGroup();
+    // Commands are not serialised, so a second confined command shares this one
+    // lookup rather than seeing a not-yet-resolved null group and being wrongly
+    // refused.
+    await agentGroupLookup;
+  }
+  return agentGroupId;
+}
+
+/** Run the title lookup once, marking it done only after it has answered. */
+async function findAgentGroup() {
+  try {
+    const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
+    if (groups.length > 0 && typeof groups[0].id === 'number') agentGroupId = groups[0].id;
+  } catch (error) {
+    // A browser without tab groups still works, ungrouped.
+  } finally {
+    agentGroupLookupDone = true;
+  }
+}
+
 /** Put a freshly opened tab into the agent group, creating it on first use. */
 async function groupTab(tabId) {
   try {
-    if (agentGroupId !== null) {
+    const existing = await agentGroup();
+    if (existing !== null) {
       try {
-        await chrome.tabs.group({ tabIds: [tabId], groupId: agentGroupId });
+        await chrome.tabs.group({ tabIds: [tabId], groupId: existing });
         return;
       } catch (error) {
         // The group vanished with its last tab; fall through and make a new one.
@@ -748,14 +1107,41 @@ async function ensureLive(tabId) {
   await waitForLoad(tabId, 20000);
 }
 
-/** Add the agent group to a tab listing. */
-function withGroup(tab) {
+/**
+ * Bring a tab to the front for the moment an action needs input to reach it.
+ *
+ * Chrome routes no input to a tab that is not visible: the renderer has no
+ * focused frame and drops the event silently. Measured, same page and same
+ * click, only visibility differing: on a background tab a main-frame click
+ * fired nothing and a click on a frame ref fired nothing, while both fired on
+ * a visible tab. Keys behave the same way — Control+a on a background tab
+ * produced zero keydowns and left the selection empty. No CDP flag changes
+ * this, so key, click, hover and drag all call this before dispatching input.
+ *
+ * It moves the user's view, so only the paths that need it may call it. Text
+ * entry does not: Input.insertText takes a different path and works on a
+ * background tab. Scrolling does not either: its wheel path is bounded and
+ * falls back to a scripted window.scrollBy, so it works hidden without a move.
+ */
+async function ensureVisible(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.active) return;
+  await chrome.tabs.update(tabId, { active: true });
+  // Activation is not composited the instant update() resolves; without this
+  // beat the first event can still land on a tab Chrome has not shown yet.
+  await new Promise(resolve => setTimeout(resolve, 250));
+}
+
+/** Add the agent group to a tab listing, and whether the agent may act on it. */
+function withGroup(tab, agentGroupId) {
+  const groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
   return {
     id: tab.id,
     title: tab.title || '',
     url: tab.url || '',
     active: tab.active === true,
-    groupId: typeof tab.groupId === 'number' ? tab.groupId : -1,
+    groupId: groupId,
+    agent: agentGroupId !== null && groupId === agentGroupId,
   };
 }
 
@@ -792,12 +1178,118 @@ async function describeTab(tabId) {
   return { tabId: tabId, url: tab.url || '', title: tab.title || '' };
 }
 
+/**
+ * One screenshot capture, taking the view only if a background one is refused.
+ *
+ * `backgroundOnly` forbids the activation fallback. The JPEG ladder sets it: by
+ * then the PNG has already succeeded, so the only reason to retry is size, and
+ * moving the user's view for a re-encode would be a poor trade. A refused
+ * background JPEG is a skipped attempt instead, which the ladder records as a
+ * null size.
+ */
+async function captureOnce(tabId, options) {
+  const backgroundOnly = options.backgroundOnly === true;
+  const params = Object.assign({ fromSurface: true }, options);
+  delete params.backgroundOnly;
+  try {
+    // A background tab is the normal case: the agent must not move the user's
+    // view to see a page. Bounded, so a frozen renderer cannot hang the call.
+    return await withTimeout(cdp(tabId, 'Page.captureScreenshot', params), 8000);
+  } catch (error) {
+    if (backgroundOnly) return null;
+    // Only when the background capture genuinely cannot be produced.
+    await chrome.tabs.update(tabId, { active: true });
+    await new Promise(resolve => setTimeout(resolve, 400));
+    return await cdp(tabId, 'Page.captureScreenshot', params);
+  }
+}
+
+/**
+ * Capture a page, re-encoding only when the first result is too big to send.
+ *
+ * PNG stays the default because it is lossless and most pages fit well inside
+ * the limit. The ladder is a guard against the pathological full-page capture,
+ * not a routine re-encode.
+ */
+async function captureBounded(tabId) {
+  const png = await captureOnce(tabId, { format: 'png' });
+  if (!png || typeof png.data !== 'string') throw new Error('the page returned no image data');
+  if (png.data.length <= SCREENSHOT_BASE64_LIMIT) return { base64: png.data, format: 'png' };
+  // The retries are background-only: the PNG already succeeded, so nothing here
+  // may activate the tab. A refused attempt is recorded as a null size.
+  const images = [];
+  const sizes = [];
+  for (let attempt = 0; ; attempt += 1) {
+    const quality = nextJpegQuality(attempt);
+    if (quality === null) break;
+    const jpeg = await captureOnce(tabId, { format: 'jpeg', quality: quality, backgroundOnly: true });
+    const data = jpeg && typeof jpeg.data === 'string' ? jpeg.data : null;
+    images.push(data);
+    sizes.push(data === null ? null : data.length);
+    if (data !== null && data.length <= SCREENSHOT_BASE64_LIMIT) break;
+  }
+  const chosen = chooseJpegAttempt(sizes, SCREENSHOT_BASE64_LIMIT);
+  if (chosen === null) {
+    // Every JPEG attempt produced nothing. An oversized PNG is still a usable
+    // image, and returning it beats turning a size problem into a failure.
+    return { base64: png.data, format: 'png' };
+  }
+  return { base64: images[chosen], format: 'jpeg' };
+}
+
+/**
+ * Every frame a snapshot should read, main frame first.
+ */
+async function framesFor(tabId) {
+  const tree = await cdp(tabId, 'Page.getFrameTree', {});
+  const flat = flattenFrameTree(tree && tree.frameTree, FRAME_LIMIT);
+  if (flat.frames.length === 0) throw new Error('the page reported no frames');
+  return flat;
+}
+
+/**
+ * An execution context inside one frame.
+ *
+ * An isolated world rather than the page's own context: the page cannot see or
+ * redefine anything in it, so a page that shadows a global cannot break the
+ * walk. CDP is not subject to the same-origin policy, so this works in
+ * cross-origin frames too.
+ */
+async function frameContext(tabId, frameId) {
+  const created = await cdp(tabId, 'Page.createIsolatedWorld', {
+    frameId: frameId,
+    worldName: 'dsh-agent-snapshot',
+  });
+  if (!created || typeof created.executionContextId !== 'number') {
+    throw new Error('could not open an execution context in frame ' + frameId);
+  }
+  return created.executionContextId;
+}
+
+/** Evaluate an expression in one frame's isolated world. */
+async function evaluateIn(tabId, contextId, expression) {
+  const result = await cdp(tabId, 'Runtime.evaluate', {
+    expression: expression,
+    contextId: contextId,
+    returnByValue: true,
+    awaitPromise: true,
+    userGesture: true,
+  });
+  if (result && result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const thrown = details.exception && (details.exception.description || details.exception.value);
+    throw new Error('page error: ' + String(thrown || details.text || 'unknown'));
+  }
+  return result && result.result ? result.result.value : undefined;
+}
+
 /** The command table. Every method answers one JSON value. */
 const COMMANDS = {
 
   async tabs() {
     const tabs = await chrome.tabs.query({});
-    return tabs.filter(tab => typeof tab.id === 'number').map(withGroup);
+    const groupId = await agentGroup();
+    return tabs.filter(tab => typeof tab.id === 'number').map(tab => withGroup(tab, groupId));
   },
 
   async open(params) {
@@ -805,9 +1297,10 @@ const COMMANDS = {
     if (!/^https?:\/\//i.test(url)) throw new Error('chrome_open needs an absolute http(s) url');
     let tabId;
     if (params.newTab === true) {
-      // Deliberately not activated. The agent works in the background so the
-      // user's view never moves; the tab still loads and is still drivable,
-      // and the user can watch it by opening the agent's tab group.
+      // Deliberately not activated. The tab still loads, and every read works
+      // on it without moving the user's view; input does bring it forward for
+      // the moment it acts. The user can watch it by opening the agent's tab
+      // group.
       const created = await chrome.tabs.create({ url: url, active: false });
       tabId = created.id;
       if (typeof tabId === 'number') await groupTab(tabId);
@@ -816,19 +1309,85 @@ const COMMANDS = {
       await chrome.tabs.update(tabId, { url: url });
     }
     if (typeof tabId !== 'number') throw new Error('could not determine the target tab');
+    rememberTab(tabId);
     await waitForLoad(tabId, 20000);
     return describeTab(tabId);
   },
 
   async snapshot(params) {
     const tabId = await resolveTabId(params.tabId);
-    const raw = await evaluate(tabId, SNAPSHOT_EXPRESSION);
-    const parsed = JSON.parse(String(raw));
-    const tree = parsed.tree === '' ? '(no interactive elements found)' : parsed.tree;
+    const flat = await framesFor(tabId);
+    const lines = [];
+    const frameText = [];
+    // Frames that could not be read. The frame tree and the execution contexts
+    // are read in separate calls, so a frame can navigate away in between. One
+    // frame going away must not cost the caller the whole snapshot, but it must
+    // not vanish silently either: the keys are reported in the trailer.
+    const unread = [];
+    let url = '';
+    let title = '';
+    let text = '';
+    for (let index = 0; index < flat.frames.length; index += 1) {
+      const frame = flat.frames[index];
+      const isMain = frame.key === 'f0';
+      let parsed;
+      try {
+        // The main frame is read in the page's own world, exactly as it was
+        // before frames existed: SNAPSHOT_EXPRESSION parks its refs in
+        // window.__dshChromeRefs, and click/type/scroll/hover/drag still resolve
+        // them through evaluate() in that same world. Reading the main frame in
+        // an isolated world would leave every main-frame ref unreachable.
+        //
+        // A child frame has no main-world consumers yet, so it is read in its own
+        // isolated world: the page cannot see or redefine anything in it, and CDP
+        // reaches cross-origin frames regardless.
+        const raw = isMain
+          ? await evaluate(tabId, SNAPSHOT_EXPRESSION)
+          : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), SNAPSHOT_EXPRESSION);
+        if (typeof raw !== 'string') {
+          unread.push(frame.key + ': the snapshot returned no value');
+          continue;
+        }
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        // The message travels with the key so a systemic CDP failure or a detach
+        // is distinguishable from one frame that navigated away.
+        unread.push(frame.key + ': ' + describe(error));
+        continue;
+      }
+      if (isMain) {
+        url = parsed.url;
+        title = parsed.title;
+        text = parsed.text;
+      } else if (parsed.text !== '') {
+        frameText.push('[' + frame.key + '] ' + String(parsed.text).slice(0, 400));
+      }
+      const tree = String(parsed.tree);
+      if (tree === '') continue;
+      const rows = tree.split('\n');
+      for (let row = 0; row < rows.length; row += 1) {
+        if (rows[row] === '') continue;
+        // A ref is an index into one document's array, so the document travels
+        // with it. The main frame stays unmarked, which keeps every existing
+        // ref in every existing prompt valid.
+        lines.push(isMain
+          ? rows[row]
+          : rows[row].replace(/^\[ref=(\d+)\]/, '[ref=$1 frame=' + frame.key + ']'));
+      }
+    }
+    const notes = [];
+    const skipped = flat.total - flat.frames.length;
+    if (skipped > 0) notes.push(skipped + ' further frame(s) not read');
+    if (unread.length > 0) {
+      notes.push(unread.length + ' frame(s) could not be read (' + unread.join(', ') + ')');
+    }
+    const suffix = notes.length === 0 ? '' : '\n\n… ' + notes.join('; ');
+    const tree = lines.length === 0 ? '(no interactive elements found)' : lines.join('\n');
+    const allText = frameText.length === 0 ? text : text + '\n' + frameText.join('\n');
     return {
-      url: parsed.url,
-      title: parsed.title,
-      snapshot: tree + '\n\n--- visible text ---\n' + parsed.text,
+      url: url,
+      title: title,
+      snapshot: tree + suffix + '\n\n--- visible text ---\n' + allText,
     };
   },
 
@@ -838,15 +1397,12 @@ const COMMANDS = {
     let y = typeof params.y === 'number' ? params.y : null;
     let label = 'coordinates ' + x + ',' + y;
     if (x === null || y === null) {
-      const point = await evaluate(tabId, pointExpression(params));
+      const point = await resolvePoint(tabId, params, '');
       if (!point) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
       x = point.x;
       y = point.y;
       label = point.label;
     }
-    // Out of the way first. The click itself is CDP input and never touches the
-    // overlay; hiding it just keeps the overlay out of whatever frame is
-    // captured next, and shows the human the page rather than the pointer.
     // Out of the way first. The click itself is CDP input and never touches the
     // overlay; hiding it just keeps the overlay out of whatever frame is
     // captured next, and shows the human the page rather than the pointer.
@@ -857,6 +1413,22 @@ const COMMANDS = {
     const held = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
     const clicks = params.clicks === 3 ? 3 : params.clicks === 2 ? 2 : 1;
     const at = { x: x, y: y, modifiers: 0, button: button };
+    // Validate before ensureVisible: a refused click must not move the user's view.
+    await assertInViewport(tabId, [{ x: x, y: y, label: label }]);
+    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
+    // resolved and validated, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
+    // Activation can settle the page back to its committed scroll, moving a
+    // target that was resolved while the tab was still hidden. Re-read it now so
+    // the dispatched point matches the page at dispatch time; see
+    // resolveVisiblePoint.
+    const placed = await resolveVisiblePoint(tabId, params, '');
+    if (!placed) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
+    x = placed.x;
+    y = placed.y;
+    label = placed.label;
+    at.x = x;
+    at.y = y;
     await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved', buttons: 0, force: 0 }, at, { button: 'none' }));
     for (let count = 1; count <= clicks; count += 1) {
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: held, clickCount: count, force: 0.5 }, at));
@@ -868,19 +1440,41 @@ const COMMANDS = {
 
   async hover(params) {
     const tabId = await resolveTabId(params.tabId);
-    const point = await evaluate(tabId, pointExpression(params));
+    const point = await resolvePoint(tabId, params, '');
     if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
+    await assertInViewport(tabId, [{ x: point.x, y: point.y, label: point.label }]);
+    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
+    // resolved, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
+    // Re-read after activation: see resolveVisiblePoint.
+    const placed = await resolveVisiblePoint(tabId, params, '');
+    if (!placed) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
     await cdp(tabId, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
+      type: 'mouseMoved', x: placed.x, y: placed.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
     });
-    await paintCursor(tabId, point.x, point.y);
-    return { hovered: point.label };
+    await paintCursor(tabId, placed.x, placed.y);
+    return { hovered: placed.label };
   },
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
-    const start = await evaluate(tabId, pointExpressionFor(params, 'from'));
-    const end = await evaluate(tabId, pointExpressionFor(params, 'to'));
+    let start = await resolvePoint(tabId, params, 'from');
+    let end = await resolvePoint(tabId, params, 'to');
+    if (!start || !end) {
+      throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
+    }
+    // Both ends, before the view moves: an interpolated path between two in-view
+    // points is itself in view, so only the ends need checking.
+    await assertInViewport(tabId, [
+      { x: start.x, y: start.y, label: start.label },
+      { x: end.x, y: end.y, label: end.label },
+    ]);
+    // Mouse input reaches no hidden tab; see ensureVisible. After both ends are
+    // resolved and validated, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
+    // Re-read both ends after activation: see resolveVisiblePoint.
+    start = await resolveVisiblePoint(tabId, params, 'from');
+    end = await resolveVisiblePoint(tabId, params, 'to');
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
@@ -907,7 +1501,7 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const hasTarget = typeof params.ref === 'number' || typeof params.selector === 'string';
     if (hasTarget) {
-      const moved = await evaluate(tabId, scrollToExpression(params));
+      const moved = await evaluateInFrame(tabId, normaliseFrameKey(params.frame), scrollToExpression(params));
       if (moved !== true) throw new Error('scroll target not found — take a fresh chrome_snapshot');
       return { scrolled: 'element into view' };
     }
@@ -943,7 +1537,47 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const needle = typeof params.text === 'string' ? params.text : '';
     if (needle === '') throw new Error('find needs some text to look for');
-    return JSON.parse(String(await evaluate(tabId, findExpression(needle))));
+    // Text that only exists inside a frame is invisible to a main-frame search,
+    // so every frame is searched and each child's quotes say which frame they
+    // came from. The main frame keeps the page's own world, exactly as it did
+    // before frames existed and exactly as the snapshot reads it; a child frame
+    // gets an isolated world the page cannot redefine.
+    const flat = await framesFor(tabId);
+    const matches = [];
+    // Frames that failed to read, so count is not silently "readable frames
+    // only". This mirrors the snapshot trailer: the frame tree and a frame's
+    // context come from separate CDP calls, so a frame can navigate away between
+    // them, and one going away must not cost every other frame's matches.
+    const unread = [];
+    let count = 0;
+    for (let index = 0; index < flat.frames.length; index += 1) {
+      const frame = flat.frames[index];
+      const isMain = frame.key === 'f0';
+      let parsed;
+      try {
+        const raw = isMain
+          ? await evaluate(tabId, findExpression(needle))
+          : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), findExpression(needle));
+        if (typeof raw !== 'string') {
+          unread.push(frame.key + ': the search returned no value');
+          continue;
+        }
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        // Same reasoning as the snapshot: a systemic CDP failure or a detach
+        // must not read as one frame quietly having no matches.
+        unread.push(frame.key + ': ' + describe(error));
+        continue;
+      }
+      count += Number(parsed.count) || 0;
+      const found = Array.isArray(parsed.matches) ? parsed.matches : [];
+      for (let m = 0; m < found.length && matches.length < 20; m += 1) {
+        matches.push(isMain ? found[m] : '[' + frame.key + '] ' + found[m]);
+      }
+    }
+    // skipped: frames the FRAME_LIMIT cap left out entirely, exactly as the
+    // snapshot reports them. unread: frames that were in range but failed.
+    return { count: count, matches: matches, skipped: flat.total - flat.frames.length, unread: unread };
   },
 
   async console(params) {
@@ -994,7 +1628,14 @@ const COMMANDS = {
       ? params.files.filter(file => typeof file === 'string' && file !== '')
       : [];
     if (files.length === 0) throw new Error('upload needs at least one absolute path in `files`');
-    const objectId = await evaluateHandle(tabId, uploadTargetExpression(params));
+    const uploadFrameKey = normaliseFrameKey(params.frame);
+    // The main frame needs no frame tree: an undefined context is the page's own
+    // world, matching evaluateInFrame, and only a child frame has a context to
+    // open. Fetching the tree for the main frame was wasted work.
+    const uploadContext = uploadFrameKey === ''
+      ? undefined
+      : await frameContext(tabId, (await frameFor(tabId, uploadFrameKey)).frame.frameId);
+    const objectId = await evaluateHandle(tabId, uploadContext, uploadTargetExpression(params));
     if (objectId === null) throw new Error('no file input found — pass a ref or selector for the input[type=file]');
     await cdp(tabId, 'DOM.setFileInputFiles', { files: files, objectId: objectId });
     return { uploaded: files.length };
@@ -1004,7 +1645,7 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const text = typeof params.text === 'string' ? params.text : '';
     if (text !== '') {
-      const focused = await evaluate(tabId, focusExpression(params));
+      const focused = await evaluateInFrame(tabId, normaliseFrameKey(params.frame), focusExpression(params));
       if (focused !== true) throw new Error('no element to type into — pass a ref or selector');
       await cdp(tabId, 'Input.insertText', { text: text });
     }
@@ -1015,16 +1656,8 @@ const COMMANDS = {
 
   async key(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Chrome delivers no key events to a tab that is not visible: the renderer
-    // has no focused frame and drops them silently (measured: zero keydowns
-    // reached the page on a background tab, and the selection never changed).
-    // Text entry is unaffected, because Input.insertText takes a different
-    // path — so a key press is the ONE action that brings its tab forward.
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.active) {
-      await chrome.tabs.update(tabId, { active: true });
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
+    // Keys are dropped on a hidden tab exactly like mouse input; see ensureVisible.
+    await ensureVisible(tabId);
     const descriptor = keyDescriptor(params.key);
     const shared = {
       key: descriptor.key,
@@ -1069,6 +1702,7 @@ const COMMANDS = {
   async close(params) {
     const tabId = typeof params.tabId === 'number' ? params.tabId : null;
     if (tabId === null) throw new Error('close needs a tabId');
+    await assertTabAllowed(tabId);
     attached.delete(tabId);
     await chrome.tabs.remove(tabId);
     return { closed: tabId };
@@ -1083,25 +1717,10 @@ const COMMANDS = {
     // The style is committed, but the compositor still holds the previous frame
     // for a beat; capture would otherwise catch the overlay mid-flight.
     await new Promise(resolve => setTimeout(resolve, 60));
-    let shot = null;
-    try {
-      // A background tab is the normal case: the agent must not move the user's
-      // view to see a page. Bounded, so a frozen renderer cannot hang the call.
-      shot = await withTimeout(
-        cdp(tabId, 'Page.captureScreenshot', { format: 'png', fromSurface: true }),
-        8000,
-      );
-    } catch (error) {
-      // Only when the background capture genuinely cannot be produced do we
-      // take the view — a last resort, not the default.
-      await chrome.tabs.update(tabId, { active: true });
-      await new Promise(resolve => setTimeout(resolve, 400));
-      shot = await cdp(tabId, 'Page.captureScreenshot', { format: 'png', fromSurface: true });
-    }
+    const shot = await captureBounded(tabId);
     const last = cursorAt.get(tabId);
     if (last) await paintCursor(tabId, last.x, last.y);
-    if (!shot || typeof shot.data !== 'string') throw new Error('the page returned no image data');
-    return { base64: shot.data };
+    return shot;
   },
 };
 

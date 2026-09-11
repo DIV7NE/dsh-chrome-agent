@@ -22,6 +22,8 @@
   <label for="port">DSH web port</label>
   <input id="port" type="number" min="1" max="65535" />
   <button id="save" type="button">Save &amp; reconnect</button>
+  <label for="confine" style="margin-top:16px"><input id="confine" type="checkbox" style="width:auto" /> Only work in the agent's own tabs</label>
+  <p style="margin:0 0 16px">When this is on, a command may not touch a tab outside the group the agent opened. Your own tabs stay reachable while it is off.</p>
   <div id="state">…</div>
   <p style="margin-top:16px">The extension id this build expects is <code id="id"></code>. The server only accepts that id, so a copy of this folder keeps working as long as the pinned key is unchanged.</p>
   <script src="options.js"></script>
