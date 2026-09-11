@@ -99,8 +99,9 @@ renderer to capture.
 Sending input is the exception. Chrome routes neither keys nor mouse events to a
 tab that is not visible, so `chrome_key`, `chrome_click`, `chrome_hover` and
 `chrome_drag` bring the agent's tab to the front for the moment they act, which
-moves your view there. `chrome_type` and `chrome_scroll` do not: text entry
-works on a background tab, and scrolling falls back to a scripted scroll.
+moves your view there. `chrome_scroll` does not move your view: scrolling falls
+back to a scripted scroll. `chrome_type` does not either, unless you set
+`submit` — the Enter it then presses is a key event, and keys need a visible tab.
 
 ### Which tab a command acts on
 
@@ -129,7 +130,9 @@ a visible one. There is no CDP flag that changes this, so `chrome_key`,
 `chrome_click`, `chrome_hover` and `chrome_drag` bring their tab forward first.
 Text entry is unaffected, because `Input.insertText` takes a different path and
 works on a background tab; scrolling falls back to a scripted `window.scrollBy`,
-so it too stays in the background.
+so it too stays in the background. A `chrome_type` with `submit` set is the
+exception: the Enter it presses is a key event, so that call brings the tab
+forward first.
 
 ## Security
 

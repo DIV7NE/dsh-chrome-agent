@@ -996,7 +996,7 @@ async function ensureLive(tabId) {
  * fired nothing and a click on a frame ref fired nothing, while both fired on
  * a visible tab. Keys behave the same way — Control+a on a background tab
  * produced zero keydowns and left the selection empty. No CDP flag changes
- * this, so key, click, hover and drag all call this first.
+ * this, so key, click, hover and drag all call this before dispatching input.
  *
  * It moves the user's view, so only the paths that need it may call it. Text
  * entry does not: Input.insertText takes a different path and works on a
@@ -1063,9 +1063,9 @@ async function describeTab(tabId) {
  *
  * `backgroundOnly` forbids the activation fallback. The JPEG ladder sets it: by
  * then the PNG has already succeeded, so the only reason to retry is size, and
- * stealing the view to re-encode a screenshot would break the plugin's promise
- * that the agent never moves the user's view. A refused background JPEG is a
- * skipped attempt instead, which the ladder records as a null size.
+ * moving the user's view for a re-encode would be a poor trade. A refused
+ * background JPEG is a skipped attempt instead, which the ladder records as a
+ * null size.
  */
 async function captureOnce(tabId, options) {
   const backgroundOnly = options.backgroundOnly === true;
@@ -1177,9 +1177,10 @@ const COMMANDS = {
     if (!/^https?:\/\//i.test(url)) throw new Error('chrome_open needs an absolute http(s) url');
     let tabId;
     if (params.newTab === true) {
-      // Deliberately not activated. The agent works in the background so the
-      // user's view never moves; the tab still loads and is still drivable,
-      // and the user can watch it by opening the agent's tab group.
+      // Deliberately not activated. The tab still loads, and every read works
+      // on it without moving the user's view; input does bring it forward for
+      // the moment it acts. The user can watch it by opening the agent's tab
+      // group.
       const created = await chrome.tabs.create({ url: url, active: false });
       tabId = created.id;
       if (typeof tabId === 'number') await groupTab(tabId);
@@ -1270,8 +1271,6 @@ const COMMANDS = {
 
   async click(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Mouse input reaches no hidden tab; see ensureVisible.
-    await ensureVisible(tabId);
     let x = typeof params.x === 'number' ? params.x : null;
     let y = typeof params.y === 'number' ? params.y : null;
     let label = 'coordinates ' + x + ',' + y;
@@ -1292,6 +1291,9 @@ const COMMANDS = {
     const held = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
     const clicks = params.clicks === 3 ? 3 : params.clicks === 2 ? 2 : 1;
     const at = { x: x, y: y, modifiers: 0, button: button };
+    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
+    // resolved and validated, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
     await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved', buttons: 0, force: 0 }, at, { button: 'none' }));
     for (let count = 1; count <= clicks; count += 1) {
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: held, clickCount: count, force: 0.5 }, at));
@@ -1303,10 +1305,11 @@ const COMMANDS = {
 
   async hover(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Mouse input reaches no hidden tab; see ensureVisible.
-    await ensureVisible(tabId);
     const point = await resolvePoint(tabId, params, '');
     if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
+    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
+    // resolved, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
     await cdp(tabId, 'Input.dispatchMouseEvent', {
       type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0, force: 0, modifiers: 0,
     });
@@ -1316,13 +1319,14 @@ const COMMANDS = {
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Mouse input reaches no hidden tab; see ensureVisible.
-    await ensureVisible(tabId);
     const start = await resolvePoint(tabId, params, 'from');
     const end = await resolvePoint(tabId, params, 'to');
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
+    // Mouse input reaches no hidden tab; see ensureVisible. After both ends are
+    // resolved and validated, so a command that then fails has not moved the view.
+    await ensureVisible(tabId);
     await hideCursor(tabId);
     await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y, button: 'none', buttons: 0, modifiers: 0 });
     await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1, force: 0.5, modifiers: 0 });
