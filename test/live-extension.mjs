@@ -227,8 +227,8 @@ try {
   // dispatches nothing would pass a "the view did not move" check vacuously.
   // Mouse input reaches no hidden tab, so the command activates it first.
   await call('click', { selector: '#k', tabId: bgA.tabId });
-  const clickLanding = await call('eval', { tabId: bgA.tabId, expression: 'document.getElementById("k").dataset.clicked || ""' });
-  check('a click on a background tab actually reaches the page', String(clickLanding.result) === 'yes', clickLanding);
+  const clickLanding = await call('eval', { tabId: bgA.tabId, expression: 'document.getElementById("k").dataset.clicked === "yes"' });
+  check('a click on a background tab actually reaches the page', String(clickLanding.result) === 'true', clickLanding);
 
   // Targeting: a command with no tabId must use the agent's own tab. The old
   // fallback was "the active tab of the last focused window", which means a bare
@@ -334,7 +334,7 @@ try {
     'var frame = document.createElement("iframe");',
     'frame.id = "probe-frame";',
     'frame.style.cssText = "position:absolute;top:200px;left:40px;width:400px;height:200px;border:0";',
-    'frame.srcdoc = "<button id=\"inner-btn\" style=\"width:200px;height:60px\">inner target</button>";',
+    'frame.srcdoc = ' + JSON.stringify('<button id="inner-btn" style="width:200px;height:60px">inner target</button>') + ';',
     'document.body.appendChild(frame);',
     '  return "ok";',
     '})()',
