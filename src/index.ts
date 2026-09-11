@@ -224,7 +224,6 @@ export const BATCHABLE_TOOLS: ReadonlySet<string> = new Set([
   'chrome_scroll',
   'chrome_type',
   'chrome_key',
-  'chrome_wait',
   'chrome_wait_for',
   'chrome_eval',
   'chrome_page_text',
@@ -293,21 +292,6 @@ export function summarizeBatchValue(value: unknown): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? null)
   const limit = 4000
   return text.length > limit ? text.slice(0, limit) + '… (truncated)' : text
-}
-
-/**
- * Sleep for a bounded number of milliseconds.
- *
- * Bounded because a wait is only ever meant to let a page settle; an unbounded
- * one would park the tool call until the harness timeout instead.
- *
- * @param ms - requested wait in milliseconds.
- * @returns how long was actually waited.
- */
-async function waitFor(ms: number): Promise<number> {
-  const bounded = Math.max(0, Math.min(30000, Math.round(Number.isFinite(ms) ? ms : 0)))
-  await new Promise(resolve => setTimeout(resolve, bounded))
-  return bounded
 }
 
 /** Capture a screenshot and write it to disk, returning where it landed. */
@@ -733,31 +717,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   }))
 
   register(defineTool({
-    name: 'chrome_wait',
-    description:
-      'Pause for a number of milliseconds. Use it inside chrome_batch where a page needs a moment after a click or a navigation, instead of spreading the wait across turns.',
-    parameters: {
-      ms: { type: 'integer', required: true, description: 'Milliseconds to wait (max 30000).' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { waited: { type: 'integer', required: true } },
-      },
-      render: textRender<{ waited: number }>(v => 'Waited ' + v.waited + 'ms.'),
-    },
-    execute: async (args: { ms: number }, exec) => {
-      exec.signal.throwIfAborted()
-      return { waited: await waitFor(args.ms) }
-    },
-  }))
-
-  register(defineTool({
     name: 'chrome_wait_for',
     description:
-      'Wait until a JavaScript expression in the page turns truthy, instead of sleeping for a guessed time. '
-      + 'Prefer this over chrome_wait: a fixed sleep must cover the slowest case, so it is either too short and flaky '
+      'Wait until a JavaScript expression in the page turns truthy. This is the ONLY supported way to wait; never '
+      + 'sleep for a guessed duration. A fixed sleep must cover the slowest case, so it is either too short and flaky '
       + 'or too long and wasted, while this returns the moment the page is ready. The first check runs immediately, '
       + 'so a condition that already holds costs one round trip. Throws when the timeout elapses, naming the last value.',
     parameters: {
@@ -975,6 +938,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       'Run several browser actions in one call. Each action names another chrome_* tool and its arguments. '
       + 'Prefer this whenever you can predict two or more steps ahead — a click then a type then a key, a form fill, '
       + 'a multi-step navigation. One batch is one round trip instead of one per action, which is where the time goes. '
+      + 'Every argument must be known before the batch is submitted, so use CSS selectors rather than refs produced by a snapshot inside the same batch, and put chrome_wait_for between steps instead of guessing a delay. '
       + 'Actions run in order and stop at the first failure; the result reports which action failed and how many never ran. '
       + 'chrome_status, chrome_tabs and chrome_batch itself are not allowed inside a batch.',
     parameters: {
@@ -1055,10 +1019,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         try {
           const value = step.method === 'screenshot'
             ? await captureScreenshot(bridge, step.params as { tabId?: number; savePath?: string })
-            : step.method === 'wait'
-              // Waiting is the host's own job; there is no page to tell.
-              ? { waited: await waitFor(Number(step.params.ms)) }
-              : await bridge.call(step.method, step.params)
+            : await bridge.call(step.method, step.params)
           results.push({ tool: step.tool, output: summarizeBatchValue(value) })
         } catch (error) {
           return stop(step.tool, error instanceof Error ? error.message : String(error), true)
