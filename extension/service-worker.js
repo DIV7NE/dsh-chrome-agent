@@ -37,6 +37,8 @@ const attached = new Set();
 /** The tab the agent is working in, and whether storage has been read yet. */
 let currentTabId = null;
 let currentTabLoaded = false;
+/** The in-flight session-storage read, shared by commands that overlap. */
+let currentTabLoad = null;
 const CURRENT_TAB_KEY = 'currentTabId';
 
 /** The DSH server port, from storage (the options page writes it). */
@@ -132,22 +134,49 @@ function describe(error) {
  */
 async function readCurrentTabId() {
   if (!currentTabLoaded) {
-    currentTabLoaded = true;
-    try {
-      const stored = await chrome.storage.session.get(CURRENT_TAB_KEY);
-      if (typeof stored[CURRENT_TAB_KEY] === 'number') currentTabId = stored[CURRENT_TAB_KEY];
-    } catch (error) {
-      // Session storage is best effort; memory alone still works this session.
-    }
+    if (currentTabLoad === null) currentTabLoad = loadCurrentTabId();
+    // Commands are not serialised, so a second caller shares this one read
+    // rather than seeing a half-finished load and returning a null tab.
+    await currentTabLoad;
   }
   return currentTabId;
+}
+
+/**
+ * Run the stored-tab read once. Never throws, and never clobbers a tab that
+ * rememberTab recorded while this read was in flight.
+ */
+async function loadCurrentTabId() {
+  try {
+    const stored = await chrome.storage.session.get(CURRENT_TAB_KEY);
+    if (currentTabLoaded) return;
+    const storedId = stored[CURRENT_TAB_KEY];
+    if (typeof storedId !== 'number') return;
+    try {
+      // A tab can close while no worker is alive to hear about it, so a stored
+      // id is a claim to check, not a fact.
+      await chrome.tabs.get(storedId);
+      currentTabId = storedId;
+    } catch (error) {
+      currentTabId = null;
+      chrome.storage.session.remove(CURRENT_TAB_KEY).catch(() => {});
+    }
+  } catch (error) {
+    // Session storage is best effort; memory alone still works this session.
+  } finally {
+    currentTabLoaded = true;
+  }
 }
 
 /** Record the tab the agent is working in, in memory and for the next worker. */
 function rememberTab(tabId) {
   currentTabId = tabId;
   currentTabLoaded = true;
-  chrome.storage.session.set({ [CURRENT_TAB_KEY]: tabId }).catch(() => {});
+  try {
+    chrome.storage.session.set({ [CURRENT_TAB_KEY]: tabId }).catch(() => {});
+  } catch (error) {
+    // Session storage is best effort; memory alone still works this session.
+  }
 }
 
 /**
@@ -159,14 +188,17 @@ function rememberTab(tabId) {
 async function assertTabAllowed(tabId) {
   const stored = await chrome.storage.local.get({ confineToAgentTabs: false });
   if (stored.confineToAgentTabs !== true) return;
-  let groupId = -1;
+  let tabGroupId = -1;
   try {
     const tab = await chrome.tabs.get(tabId);
-    groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
+    tabGroupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
   } catch (error) {
     throw new Error('tab ' + tabId + ' is gone');
   }
-  if (isTabAllowed(groupId, agentGroupId, true)) return;
+  // The agent's own group has to be resolved rather than read off agentGroupId:
+  // an evicted worker comes back without it.
+  const ownGroupId = await agentGroup();
+  if (isTabAllowed(tabGroupId, ownGroupId, true)) return;
   throw new Error('Tab ' + tabId + " is not in the agent's tab group for this session. "
     + 'Tools can only target tabs inside the group; call chrome_tabs to list the tabs the agent may use.');
 }
@@ -792,12 +824,36 @@ const GROUP_TITLE = 'DSH Chrome Agent';
 const GROUP_COLOR = 'blue';
 let agentGroupId = null;
 
+/** Whether the title lookup has already run in this worker's life. */
+let agentGroupLookupDone = false;
+
+/**
+ * The agent's tab group, found again after a worker restart.
+ *
+ * agentGroupId is in memory only, so an evicted worker comes back without it. The
+ * group itself outlives the worker and is the one wearing GROUP_TITLE, so it can be
+ * found rather than duplicated.
+ */
+async function agentGroup() {
+  if (agentGroupId !== null) return agentGroupId;
+  if (agentGroupLookupDone) return null;
+  agentGroupLookupDone = true;
+  try {
+    const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
+    if (groups.length > 0 && typeof groups[0].id === 'number') agentGroupId = groups[0].id;
+  } catch (error) {
+    // A browser without tab groups still works, ungrouped.
+  }
+  return agentGroupId;
+}
+
 /** Put a freshly opened tab into the agent group, creating it on first use. */
 async function groupTab(tabId) {
   try {
-    if (agentGroupId !== null) {
+    const existing = await agentGroup();
+    if (existing !== null) {
       try {
-        await chrome.tabs.group({ tabIds: [tabId], groupId: agentGroupId });
+        await chrome.tabs.group({ tabIds: [tabId], groupId: existing });
         return;
       } catch (error) {
         // The group vanished with its last tab; fall through and make a new one.
@@ -832,7 +888,7 @@ async function ensureLive(tabId) {
 }
 
 /** Add the agent group to a tab listing, and whether the agent may act on it. */
-function withGroup(tab) {
+function withGroup(tab, agentGroupId) {
   const groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
   return {
     id: tab.id,
@@ -882,7 +938,8 @@ const COMMANDS = {
 
   async tabs() {
     const tabs = await chrome.tabs.query({});
-    return tabs.filter(tab => typeof tab.id === 'number').map(withGroup);
+    const groupId = await agentGroup();
+    return tabs.filter(tab => typeof tab.id === 'number').map(tab => withGroup(tab, groupId));
   },
 
   async open(params) {

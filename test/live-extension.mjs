@@ -233,7 +233,7 @@ try {
   await call('close', { tabId: agentTab.tabId });
   let noTabError = '';
   try { await call('eval', { expression: 'location.search' }); } catch (error) { noTabError = String(error.message); }
-  check('with no agent tab left a bare command fails instead of using the user tab',
+  check('with the remembered tab closed a bare command fails instead of using the user tab',
     /no tab yet/.test(noTabError), noTabError);
 
   await call('close', { tabId: userTab.tabId });
