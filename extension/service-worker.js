@@ -1155,6 +1155,7 @@ const COMMANDS = {
   async close(params) {
     const tabId = typeof params.tabId === 'number' ? params.tabId : null;
     if (tabId === null) throw new Error('close needs a tabId');
+    await assertTabAllowed(tabId);
     attached.delete(tabId);
     await chrome.tabs.remove(tabId);
     return { closed: tabId };

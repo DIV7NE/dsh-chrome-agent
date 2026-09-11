@@ -243,9 +243,11 @@ try {
   const ownTab = await call('open', { url: 'https://example.com/?own=1', newTab: true });
   const listing = await call('tabs');
   const own = listing.filter(t => t.id === ownTab.tabId)[0];
-  const others = listing.filter(t => t.id !== ownTab.tabId);
+  // The agent's own tabs all share one group; anything outside it is the user's.
+  const foreign = listing.filter(t => t.groupId !== own.groupId);
   check('a tab the agent opened is reported as its own', own && own.agent === true, own);
-  check('a tab the agent did not open is not', others.length > 0 && others.every(t => t.agent === false), others.slice(0, 3));
+  check('a tab outside the agent group is not marked as the agent\'s',
+    foreign.length > 0 && foreign.every(t => t.agent === false), foreign.slice(0, 3));
   await call('close', { tabId: ownTab.tabId });
 
   // --- agent cursor -----------------------------------------------------------
