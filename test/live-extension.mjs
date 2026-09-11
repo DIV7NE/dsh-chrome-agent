@@ -13,6 +13,9 @@
  * port to the port below on its options page, then run this. Set the port back
  * to your server's afterwards.
  */
+import { writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocketServer } from 'ws'
 
 const PORT = Number(process.argv[2] || 3099);
@@ -318,7 +321,7 @@ try {
 
   // scroll: wheel by delta
   await call('scroll', { deltaY: 900, tabId: cap.tabId });
-  const scrolled = await call('eval', { tabId: cap.tabId, expression: 'String(Math.round(window.scrollY))' });
+  const scrolled = await call('eval', { tabId: cap.tabId, expression: 'Math.round(window.scrollY)' });
   check('a wheel scroll moves the page', Number(scrolled.result) > 100, scrolled);
 
   // scroll: bring a ref into view
@@ -326,7 +329,7 @@ try {
   const boxRef = /\[ref=(\d+)\] (?:div|button)?\s*"box"/i.exec(capSnap.snapshot);
   if (boxRef) {
     await call('scroll', { ref: Number(boxRef[1]), tabId: cap.tabId });
-    const inView = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify((function () { var el = document.getElementById("box"); if (!el) return null; var r = el.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; })())' });
+    const inView = await call('eval', { tabId: cap.tabId, expression: '(function () { var el = document.getElementById("box"); if (!el) return null; var r = el.getBoundingClientRect(); return r.top >= 0 && r.top < innerHeight; })()' });
     check('scrolling to a ref brings it into view', String(inView.result) === 'true', inView);
   } else {
     check('snapshot exposes a ref for the probe div', false, capSnap.snapshot.slice(0, 300));
@@ -362,7 +365,7 @@ try {
   if (innerRef) {
     await call('eval', { tabId: cap.tabId, expression: '(function () { window.__hit = false; document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; }); return "ok"; })()' });
     await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
-    const hit = await call('eval', { tabId: cap.tabId, expression: 'String(document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true)' });
+    const hit = await call('eval', { tabId: cap.tabId, expression: 'document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true' });
     check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
   } else {
     check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
@@ -383,19 +386,19 @@ try {
   }
 
   await call('hover', { selector: '#b', tabId: cap.tabId });
-  const afterHover = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterHover = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('hover dispatches a move the page sees', String(afterHover.result).indexOf('mousemove') !== -1, afterHover);
 
   await call('click', { selector: '#b', clicks: 2, tabId: cap.tabId });
-  const afterDouble = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterDouble = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('a double click reaches detail 2', String(afterDouble.result).indexOf('dblclick:0:2') !== -1, afterDouble);
 
   await call('click', { selector: '#b', button: 'right', tabId: cap.tabId });
-  const afterRight = await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' });
+  const afterRight = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('a right click reaches button 2', String(afterRight.result).indexOf('contextmenu:2') !== -1, afterRight);
 
   await call('drag', { fromSelector: '#box', toSelector: '#f', tabId: cap.tabId });
-  const ev = JSON.parse(String((await call('eval', { tabId: cap.tabId, expression: 'JSON.stringify(window.__ev)' })).result));
+  const ev = JSON.parse(String((await call('eval', { tabId: cap.tabId, expression: 'window.__ev' })).result));
   const startAt = ev.indexOf('mousedown:0:1');
   const endAt = ev.lastIndexOf('mouseup:0:1');
   const movesBetween = startAt >= 0 && endAt > startAt && ev.slice(startAt, endAt).filter(k => k.indexOf('mousemove:0') === 0).length;
@@ -416,16 +419,16 @@ try {
   check('network captures the probe request', JSON.stringify(reqs.entries).indexOf('probe=1') !== -1, reqs.entries.slice(0, 4));
 
   await call('resize', { width: 420, height: 640, tabId: cap.tabId });
-  const sized = await call('eval', { tabId: cap.tabId, expression: 'String(window.innerWidth)' });
+  const sized = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
   check('resize changes the layout width', Number(sized.result) === 420, sized);
   await call('resize', { width: 0, height: 0, tabId: cap.tabId });
-  const cleared = await call('eval', { tabId: cap.tabId, expression: 'String(window.innerWidth)' });
+  const cleared = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
   check('resize clears again', Number(cleared.result) !== 420, cleared);
 
   const uploadPath = join(tmpdir(), 'dsh-chrome-upload-probe.txt');
   await writeFile(uploadPath, 'probe');
   await call('upload', { files: [uploadPath], selector: '#f', tabId: cap.tabId });
-  const attached = await call('eval', { tabId: cap.tabId, expression: 'String(document.getElementById("f").files.length)' });
+  const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
 
   // Close every test tab, including litter from earlier runs.
