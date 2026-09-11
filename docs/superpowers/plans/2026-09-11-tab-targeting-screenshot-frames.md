@@ -529,8 +529,9 @@ git commit -m "fix: target the agent's own tab instead of the user's active tab"
 ### Task 3: Confinement, and telling the agent's tabs from the user's
 
 **Files:**
-- Modify: `extension/service-worker.js` — a new `assertTabAllowed`, `resolveTabId`, `withGroup` (line 752)
+- Modify: `extension/service-worker.js` — a new `assertTabAllowed`, `resolveTabId`, `withGroup` (line 752), and the `close` command
 - Modify: `extension/options.html`, `extension/options.js`
+- Modify: `src/index.ts` — declare the `agent` field in `chrome_tabs`'s output schema and render. Without it the host rejects every call, because dsh-tools validates tool output against `additionalProperties: false`. (Added by controller ruling after implementation: the original file list omitted this and the command would have failed at runtime.)
 - Modify: `test/live-extension.mjs`
 
 **Interfaces:**
@@ -549,7 +550,12 @@ const listing = await call('tabs');
 const own = listing.filter(t => t.id === ownTab.tabId)[0];
 const others = listing.filter(t => t.id !== ownTab.tabId);
 check('a tab the agent opened is reported as its own', own && own.agent === true, own);
-check('a tab the agent did not open is not', others.length > 0 && others.every(t => t.agent === false), others.slice(0, 3));
+// Membership is decided by group, not by "is it my tab": by this point the suite has
+// already opened and left open several agent tabs, so an others.every(agent === false)
+// check fails. Anything outside the agent's group is the user's.
+const foreign = listing.filter(t => t.groupId !== own.groupId);
+check('a tab outside the agent group is not marked as the agent\'s',
+  foreign.length > 0 && foreign.every(t => t.agent === false), foreign.slice(0, 3));
 await call('close', { tabId: ownTab.tabId });
 ```
 
@@ -584,6 +590,18 @@ async function assertTabAllowed(tabId) {
     + 'Tools can only target tabs inside the group; call chrome_tabs to list the tabs the agent may use.');
 }
 ```
+
+Then confine `close` as well. It reads `params.tabId` directly rather than going
+through `resolveTabId`, so without this the agent can close one of the user's tabs while
+`confineToAgentTabs` is on — and closing a tab is destructive and irreversible. After its
+`tabId === null` check and before `attached.delete(tabId)`, add:
+
+```js
+    await assertTabAllowed(tabId);
+```
+
+Do not give `close` a default target by routing it through `resolveTabId`; requiring an
+explicit id is correct for a destructive command.
 
 Then in `resolveTabId`, add the check on both paths:
 
