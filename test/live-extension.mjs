@@ -371,6 +371,18 @@ try {
     check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
   }
 
+  // page_text is deliberately main-frame only: its job is reading the article,
+  // and frame text is usually widget noise. Assert the decision, not just intend it.
+  const mainOnly = await call('pageText', { tabId: cap.tabId });
+  check('page_text stays on the main page by decision',
+    String(mainOnly.text).indexOf('inner target') === -1, String(mainOnly.text).slice(0, 200));
+
+  const framedFind = await call('find', { text: 'inner target', tabId: cap.tabId });
+  check('find reaches text that only exists inside a frame',
+    framedFind.count > 0, framedFind);
+  check('a match from a frame says which frame it came from',
+    framedFind.matches.some(m => /^\[f\d+\]/.test(m)), framedFind.matches);
+
   // A background tab gets no wheel event from the compositor, and Chrome never
   // acks the call. It must fall back quickly rather than burn the caller's
   // whole timeout, so time it with the tab deliberately put in the background.

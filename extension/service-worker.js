@@ -1315,7 +1315,37 @@ const COMMANDS = {
     const tabId = await resolveTabId(params.tabId);
     const needle = typeof params.text === 'string' ? params.text : '';
     if (needle === '') throw new Error('find needs some text to look for');
-    return JSON.parse(String(await evaluate(tabId, findExpression(needle))));
+    // Text that only exists inside a frame is invisible to a main-frame search,
+    // so every frame is searched and each child's quotes say which frame they
+    // came from. The main frame keeps the page's own world, exactly as it did
+    // before frames existed and exactly as the snapshot reads it; a child frame
+    // gets an isolated world the page cannot redefine.
+    const flat = await framesFor(tabId);
+    const matches = [];
+    let count = 0;
+    for (let index = 0; index < flat.frames.length; index += 1) {
+      const frame = flat.frames[index];
+      const isMain = frame.key === 'f0';
+      let parsed;
+      try {
+        const raw = isMain
+          ? await evaluate(tabId, findExpression(needle))
+          : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), findExpression(needle));
+        if (typeof raw !== 'string') continue;
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        // The frame tree and each frame's execution context come from separate
+        // CDP calls, so a frame can navigate away in between. One frame that
+        // cannot be read must not cost the caller every other frame's matches.
+        continue;
+      }
+      count += Number(parsed.count) || 0;
+      const found = Array.isArray(parsed.matches) ? parsed.matches : [];
+      for (let m = 0; m < found.length && matches.length < 20; m += 1) {
+        matches.push(isMain ? found[m] : '[' + frame.key + '] ' + found[m]);
+      }
+    }
+    return { count: count, matches: matches };
   },
 
   async console(params) {
