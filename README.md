@@ -84,9 +84,9 @@ frames it could not read at all.
 ## It works in the background
 
 Every tab the agent opens lands in a **tab group called "DSH Chrome Agent"**, and
-opening one **does not move your view**: the tab is created inactive, loads, and
-is drivable in place. You can collapse the group and forget it, or open it to
-watch. Closing the group closes the agent's work; your own tabs are untouched.
+opening one **does not move your view**: the tab is created inactive and loads in
+the background. You can collapse the group and forget it, or open it to watch.
+Closing the group closes the agent's work; your own tabs are untouched.
 
 Reads stay in the background too. Snapshots, evaluations, text, network and
 console all work on a tab without bringing it forward, and screenshots follow the
