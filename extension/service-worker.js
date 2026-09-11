@@ -602,11 +602,6 @@ function pointExpressionFor(params, prefix) {
   ].join('\n');
 }
 
-/** The plain single-target resolver used by click, hover and type. */
-function pointExpression(params) {
-  return pointExpressionFor(params, '');
-}
-
 /**
  * Sum the offsets of a frame and every frame between it and the top.
  *
@@ -685,7 +680,6 @@ async function evaluateInFrame(tabId, frameKey, expression) {
 async function resolvePoint(tabId, params, prefix) {
   const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
   const found = await frameFor(tabId, frameKey);
-  const contextId = await frameContext(tabId, found.frame.frameId);
   const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
   if (frameKey === '') return point;
