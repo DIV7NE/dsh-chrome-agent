@@ -1026,7 +1026,10 @@ if (innerRef) {
 // expression — a statement list is a syntax error.
 await call('eval', { tabId: cap.tabId, expression: '(function () { document.querySelector("#probe-frame").contentWindow.document.getElementById("inner-btn").addEventListener("click", function () { window.__hit = true; }); return "ok"; })()' });
   await call('click', { ref: Number(innerRef[1]), frame: innerRef[2], tabId: cap.tabId });
-  const hit = await call('eval', { tabId: cap.tabId, expression: 'String(document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true)' });
+  // No String(...) here: the eval command already JSON-stringifies, so a boolean
+  // arrives as "true". Pre-serializing would deliver '"true"' and the check
+  // below could never pass.
+  const hit = await call('eval', { tabId: cap.tabId, expression: 'document.querySelector("#probe-frame").contentWindow.__hit === true || window.__hit === true' });
   check('a ref from a frame clicks the element inside it', String(hit.result) === 'true', hit);
 } else {
   check('a ref from a frame clicks the element inside it', false, framed.snapshot.slice(0, 300));
