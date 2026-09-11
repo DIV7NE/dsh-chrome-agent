@@ -939,8 +939,14 @@ Replace the `snapshot` command (lines 818-828) with:
     let text = '';
     for (let index = 0; index < flat.frames.length; index += 1) {
       const frame = flat.frames[index];
-      const contextId = await frameContext(tabId, frame.frameId);
-      const raw = await evaluateIn(tabId, contextId, SNAPSHOT_EXPRESSION);
+      // The MAIN frame stays in the page's own world. Every ref consumer already
+      // looks for window.__dshChromeRefs there, and an isolated world has its own
+      // global, so running f0 isolated would leave every main-frame ref
+      // unresolvable. Child frames, which no consumer could reach before, get an
+      // isolated world the page cannot see or shadow.
+      const raw = frame.key === 'f0'
+        ? await evaluate(tabId, SNAPSHOT_EXPRESSION)
+        : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), SNAPSHOT_EXPRESSION);
       if (typeof raw !== 'string') continue;
       const parsed = JSON.parse(raw);
       const isMain = frame.key === 'f0';
@@ -1092,6 +1098,11 @@ async function frameFor(tabId, frameKey) {
 
 /** Evaluate an expression inside the named frame; the empty key is the main frame. */
 async function evaluateInFrame(tabId, frameKey, expression) {
+  // The main frame is evaluated in the page's own world, which is where the
+  // snapshot wrote its refs and where every existing ref consumer looks. Only a
+  // child frame uses an isolated world. This is the single place the choice is
+  // made, so click, hover, type, scroll, upload and drag all inherit it.
+  if (frameKey === '') return evaluate(tabId, expression);
   const found = await frameFor(tabId, frameKey);
   const contextId = await frameContext(tabId, found.frame.frameId);
   return evaluateIn(tabId, contextId, expression);
@@ -1109,7 +1120,7 @@ async function resolvePoint(tabId, params, prefix) {
   const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
   const found = await frameFor(tabId, frameKey);
   const contextId = await frameContext(tabId, found.frame.frameId);
-  const point = await evaluateIn(tabId, contextId, pointExpressionFor(params, prefix));
+  const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
   if (frameKey === '') return point;
   const offset = await frameOffsetFor(tabId, found.frames, frameKey);
@@ -1191,8 +1202,12 @@ one needs the context rather than a value. Replace:
 with:
 
 ```js
-    const uploadFrame = await frameFor(tabId, normaliseFrameKey(params.frame));
-    const uploadContext = await frameContext(tabId, uploadFrame.frame.frameId);
+    const uploadFrameKey = normaliseFrameKey(params.frame);
+    const uploadFrame = await frameFor(tabId, uploadFrameKey);
+    // undefined context means the page's own world, matching evaluateInFrame.
+    const uploadContext = uploadFrameKey === ''
+      ? undefined
+      : await frameContext(tabId, uploadFrame.frame.frameId);
     const objectId = await evaluateHandle(tabId, uploadContext, uploadTargetExpression(params));
 ```
 
