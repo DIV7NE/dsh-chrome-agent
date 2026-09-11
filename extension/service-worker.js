@@ -987,6 +987,31 @@ async function ensureLive(tabId) {
   await waitForLoad(tabId, 20000);
 }
 
+/**
+ * Bring a tab to the front for the moment an action needs input to reach it.
+ *
+ * Chrome routes no input to a tab that is not visible: the renderer has no
+ * focused frame and drops the event silently. Measured, same page and same
+ * click, only visibility differing: on a background tab a main-frame click
+ * fired nothing and a click on a frame ref fired nothing, while both fired on
+ * a visible tab. Keys behave the same way — Control+a on a background tab
+ * produced zero keydowns and left the selection empty. No CDP flag changes
+ * this, so key, click, hover and drag all call this first.
+ *
+ * It moves the user's view, so only the paths that need it may call it. Text
+ * entry does not: Input.insertText takes a different path and works on a
+ * background tab. Scrolling does not either: its wheel path is bounded and
+ * falls back to a scripted window.scrollBy, so it works hidden without a move.
+ */
+async function ensureVisible(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.active) return;
+  await chrome.tabs.update(tabId, { active: true });
+  // Activation is not composited the instant update() resolves; without this
+  // beat the first event can still land on a tab Chrome has not shown yet.
+  await new Promise(resolve => setTimeout(resolve, 250));
+}
+
 /** Add the agent group to a tab listing, and whether the agent may act on it. */
 function withGroup(tab, agentGroupId) {
   const groupId = typeof tab.groupId === 'number' ? tab.groupId : -1;
@@ -1245,6 +1270,8 @@ const COMMANDS = {
 
   async click(params) {
     const tabId = await resolveTabId(params.tabId);
+    // Mouse input reaches no hidden tab; see ensureVisible.
+    await ensureVisible(tabId);
     let x = typeof params.x === 'number' ? params.x : null;
     let y = typeof params.y === 'number' ? params.y : null;
     let label = 'coordinates ' + x + ',' + y;
@@ -1276,6 +1303,8 @@ const COMMANDS = {
 
   async hover(params) {
     const tabId = await resolveTabId(params.tabId);
+    // Mouse input reaches no hidden tab; see ensureVisible.
+    await ensureVisible(tabId);
     const point = await resolvePoint(tabId, params, '');
     if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
     await cdp(tabId, 'Input.dispatchMouseEvent', {
@@ -1287,6 +1316,8 @@ const COMMANDS = {
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
+    // Mouse input reaches no hidden tab; see ensureVisible.
+    await ensureVisible(tabId);
     const start = await resolvePoint(tabId, params, 'from');
     const end = await resolvePoint(tabId, params, 'to');
     if (!start || !end) {
@@ -1468,16 +1499,8 @@ const COMMANDS = {
 
   async key(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Chrome delivers no key events to a tab that is not visible: the renderer
-    // has no focused frame and drops them silently (measured: zero keydowns
-    // reached the page on a background tab, and the selection never changed).
-    // Text entry is unaffected, because Input.insertText takes a different
-    // path — so a key press is the ONE action that brings its tab forward.
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.active) {
-      await chrome.tabs.update(tabId, { active: true });
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
+    // Keys are dropped on a hidden tab exactly like mouse input; see ensureVisible.
+    await ensureVisible(tabId);
     const descriptor = keyDescriptor(params.key);
     const shared = {
       key: descriptor.key,

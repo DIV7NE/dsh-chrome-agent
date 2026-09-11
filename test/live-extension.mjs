@@ -218,14 +218,17 @@ try {
   check('a capture does not steal the view', !!afterShot && afterShot.active === false, afterShot);
   await call('eval', {
     tabId: bgA.tabId,
-    expression: '(function () { document.body.innerHTML = \'<input id="k" type="text">\'; return "ok"; })()',
+    expression: '(function () { document.body.innerHTML = \'<input id="k" type="text">\'; document.getElementById("k").addEventListener("click", function () { this.dataset.clicked = "yes"; }); return "ok"; })()',
   });
   await call('type', { selector: '#k', text: 'background typing', tabId: bgA.tabId });
   const bgValue = await call('eval', { tabId: bgA.tabId, expression: 'document.activeElement.value' });
   check('typing reaches a background tab', String(bgValue.result).indexOf('background') !== -1, bgValue);
+  // The click must actually land, not just leave the tab inactive. A click that
+  // dispatches nothing would pass a "the view did not move" check vacuously.
+  // Mouse input reaches no hidden tab, so the command activates it first.
   await call('click', { selector: '#k', tabId: bgA.tabId });
-  const afterClick = (await call('tabs')).find(t => t.id === bgA.tabId);
-  check('a click does not steal the view', !!afterClick && afterClick.active === false, afterClick);
+  const clickLanding = await call('eval', { tabId: bgA.tabId, expression: 'document.getElementById("k").dataset.clicked || ""' });
+  check('a click on a background tab actually reaches the page', String(clickLanding.result) === 'yes', clickLanding);
 
   // Targeting: a command with no tabId must use the agent's own tab. The old
   // fallback was "the active tab of the last focused window", which means a bare
