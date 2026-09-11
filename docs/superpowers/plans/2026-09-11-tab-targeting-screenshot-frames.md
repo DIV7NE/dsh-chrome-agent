@@ -724,10 +724,10 @@ In `extension/service-worker.js`, replace the body of `screenshot` (lines 1077-1
     if (last) await paintCursor(tabId, last.x, last.y);
     return shot;
   },
-};```
+};
 ```
+
 // (the trailing `};` closes the COMMANDS table — keep whatever closes it today)
-```
 
 Then add these two helpers above `const COMMANDS`:
 
