@@ -20,6 +20,7 @@ const SCREENSHOT_BASE64_LIMIT = PURE.SCREENSHOT_BASE64_LIMIT;
 const flattenFrameTree = PURE.flattenFrameTree;
 const normaliseFrameKey = PURE.normaliseFrameKey;
 const nextJpegQuality = PURE.nextJpegQuality;
+const chooseJpegAttempt = PURE.chooseJpegAttempt;
 const isTabAllowed = PURE.isTabAllowed;
 const sumFrameOffsets = PURE.sumFrameOffsets;
 
@@ -422,13 +423,16 @@ const CURSOR_HALO = 'rgba(122,162,247,0.50)';
  * file input has to be evaluated with returnByValue off.
  */
 async function evaluateHandle(tabId, contextId, expression) {
-  const result = await cdp(tabId, 'Runtime.evaluate', {
+  const params = {
     expression: expression,
-    contextId: contextId,
     returnByValue: false,
     awaitPromise: true,
     userGesture: true,
-  });
+  };
+  // The main frame has no contextId, so the key is omitted rather than set to
+  // undefined, which the protocol would read as a malformed context reference.
+  if (contextId !== undefined) params.contextId = contextId;
+  const result = await cdp(tabId, 'Runtime.evaluate', params);
   if (result && result.exceptionDetails) {
     const details = result.exceptionDetails;
     const thrown = details.exception && (details.exception.description || details.exception.value);
@@ -679,10 +683,12 @@ async function evaluateInFrame(tabId, frameKey, expression) {
  */
 async function resolvePoint(tabId, params, prefix) {
   const frameKey = normaliseFrameKey(params[prefix === '' ? 'frame' : prefix + 'Frame']);
-  const found = await frameFor(tabId, frameKey);
+  // The main frame needs no frame tree: its point is already in the page's own
+  // coordinates, so only a child frame has a parent-tree offset to walk.
   const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
   if (frameKey === '') return point;
+  const found = await frameFor(tabId, frameKey);
   const offset = await frameOffsetFor(tabId, found.frames, frameKey);
   return { x: point.x + offset.x, y: point.y + offset.y, label: point.label };
 }
@@ -907,6 +913,8 @@ let agentGroupId = null;
 
 /** Whether the title lookup has already run in this worker's life. */
 let agentGroupLookupDone = false;
+/** The in-flight title lookup, shared by commands that overlap. */
+let agentGroupLookup = null;
 
 /**
  * The agent's tab group, found again after a worker restart.
@@ -917,15 +925,26 @@ let agentGroupLookupDone = false;
  */
 async function agentGroup() {
   if (agentGroupId !== null) return agentGroupId;
-  if (agentGroupLookupDone) return null;
-  agentGroupLookupDone = true;
+  if (!agentGroupLookupDone) {
+    if (agentGroupLookup === null) agentGroupLookup = findAgentGroup();
+    // Commands are not serialised, so a second confined command shares this one
+    // lookup rather than seeing a not-yet-resolved null group and being wrongly
+    // refused.
+    await agentGroupLookup;
+  }
+  return agentGroupId;
+}
+
+/** Run the title lookup once, marking it done only after it has answered. */
+async function findAgentGroup() {
   try {
     const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
     if (groups.length > 0 && typeof groups[0].id === 'number') agentGroupId = groups[0].id;
   } catch (error) {
     // A browser without tab groups still works, ungrouped.
+  } finally {
+    agentGroupLookupDone = true;
   }
-  return agentGroupId;
 }
 
 /** Put a freshly opened tab into the agent group, creating it on first use. */
@@ -1014,14 +1033,25 @@ async function describeTab(tabId) {
   return { tabId: tabId, url: tab.url || '', title: tab.title || '' };
 }
 
-/** One screenshot capture, taking the view only if a background one is refused. */
+/**
+ * One screenshot capture, taking the view only if a background one is refused.
+ *
+ * `backgroundOnly` forbids the activation fallback. The JPEG ladder sets it: by
+ * then the PNG has already succeeded, so the only reason to retry is size, and
+ * stealing the view to re-encode a screenshot would break the plugin's promise
+ * that the agent never moves the user's view. A refused background JPEG is a
+ * skipped attempt instead, which the ladder records as a null size.
+ */
 async function captureOnce(tabId, options) {
+  const backgroundOnly = options.backgroundOnly === true;
   const params = Object.assign({ fromSurface: true }, options);
+  delete params.backgroundOnly;
   try {
     // A background tab is the normal case: the agent must not move the user's
     // view to see a page. Bounded, so a frozen renderer cannot hang the call.
     return await withTimeout(cdp(tabId, 'Page.captureScreenshot', params), 8000);
   } catch (error) {
+    if (backgroundOnly) return null;
     // Only when the background capture genuinely cannot be produced.
     await chrome.tabs.update(tabId, { active: true });
     await new Promise(resolve => setTimeout(resolve, 400));
@@ -1040,17 +1070,26 @@ async function captureBounded(tabId) {
   const png = await captureOnce(tabId, { format: 'png' });
   if (!png || typeof png.data !== 'string') throw new Error('the page returned no image data');
   if (png.data.length <= SCREENSHOT_BASE64_LIMIT) return { base64: png.data, format: 'png' };
-  let smallest = null;
+  // The retries are background-only: the PNG already succeeded, so nothing here
+  // may activate the tab. A refused attempt is recorded as a null size.
+  const images = [];
+  const sizes = [];
   for (let attempt = 0; ; attempt += 1) {
     const quality = nextJpegQuality(attempt);
     if (quality === null) break;
-    const jpeg = await captureOnce(tabId, { format: 'jpeg', quality: quality });
-    if (!jpeg || typeof jpeg.data !== 'string') continue;
-    if (smallest === null || jpeg.data.length < smallest.length) smallest = jpeg.data;
-    if (jpeg.data.length <= SCREENSHOT_BASE64_LIMIT) return { base64: jpeg.data, format: 'jpeg' };
+    const jpeg = await captureOnce(tabId, { format: 'jpeg', quality: quality, backgroundOnly: true });
+    const data = jpeg && typeof jpeg.data === 'string' ? jpeg.data : null;
+    images.push(data);
+    sizes.push(data === null ? null : data.length);
+    if (data !== null && data.length <= SCREENSHOT_BASE64_LIMIT) break;
   }
-  if (smallest === null) throw new Error('the page returned no image data');
-  return { base64: smallest, format: 'jpeg' };
+  const chosen = chooseJpegAttempt(sizes, SCREENSHOT_BASE64_LIMIT);
+  if (chosen === null) {
+    // Every JPEG attempt produced nothing. An oversized PNG is still a usable
+    // image, and returning it beats turning a size problem into a failure.
+    return { base64: png.data, format: 'png' };
+  }
+  return { base64: images[chosen], format: 'jpeg' };
 }
 
 /**
@@ -1219,9 +1258,6 @@ const COMMANDS = {
     // Out of the way first. The click itself is CDP input and never touches the
     // overlay; hiding it just keeps the overlay out of whatever frame is
     // captured next, and shows the human the page rather than the pointer.
-    // Out of the way first. The click itself is CDP input and never touches the
-    // overlay; hiding it just keeps the overlay out of whatever frame is
-    // captured next, and shows the human the page rather than the pointer.
     await hideCursor(tabId);
     await new Promise(resolve => setTimeout(resolve, 50));
     const button = params.button === 'right' ? 'right' : params.button === 'middle' ? 'middle' : 'left';
@@ -1322,6 +1358,11 @@ const COMMANDS = {
     // gets an isolated world the page cannot redefine.
     const flat = await framesFor(tabId);
     const matches = [];
+    // Frames that failed to read, so count is not silently "readable frames
+    // only". This mirrors the snapshot trailer: the frame tree and a frame's
+    // context come from separate CDP calls, so a frame can navigate away between
+    // them, and one going away must not cost every other frame's matches.
+    const unread = [];
     let count = 0;
     for (let index = 0; index < flat.frames.length; index += 1) {
       const frame = flat.frames[index];
@@ -1331,12 +1372,13 @@ const COMMANDS = {
         const raw = isMain
           ? await evaluate(tabId, findExpression(needle))
           : await evaluateIn(tabId, await frameContext(tabId, frame.frameId), findExpression(needle));
-        if (typeof raw !== 'string') continue;
+        if (typeof raw !== 'string') {
+          unread.push(frame.key);
+          continue;
+        }
         parsed = JSON.parse(raw);
       } catch (error) {
-        // The frame tree and each frame's execution context come from separate
-        // CDP calls, so a frame can navigate away in between. One frame that
-        // cannot be read must not cost the caller every other frame's matches.
+        unread.push(frame.key);
         continue;
       }
       count += Number(parsed.count) || 0;
@@ -1345,7 +1387,9 @@ const COMMANDS = {
         matches.push(isMain ? found[m] : '[' + frame.key + '] ' + found[m]);
       }
     }
-    return { count: count, matches: matches };
+    // skipped: frames the FRAME_LIMIT cap left out entirely, exactly as the
+    // snapshot reports them. unread: frames that were in range but failed.
+    return { count: count, matches: matches, skipped: flat.total - flat.frames.length, unread: unread };
   },
 
   async console(params) {
@@ -1397,11 +1441,12 @@ const COMMANDS = {
       : [];
     if (files.length === 0) throw new Error('upload needs at least one absolute path in `files`');
     const uploadFrameKey = normaliseFrameKey(params.frame);
-    const uploadFrame = await frameFor(tabId, uploadFrameKey);
-    // undefined context means the page's own world, matching evaluateInFrame.
+    // The main frame needs no frame tree: an undefined context is the page's own
+    // world, matching evaluateInFrame, and only a child frame has a context to
+    // open. Fetching the tree for the main frame was wasted work.
     const uploadContext = uploadFrameKey === ''
       ? undefined
-      : await frameContext(tabId, uploadFrame.frame.frameId);
+      : await frameContext(tabId, (await frameFor(tabId, uploadFrameKey)).frame.frameId);
     const objectId = await evaluateHandle(tabId, uploadContext, uploadTargetExpression(params));
     if (objectId === null) throw new Error('no file input found — pass a ref or selector for the input[type=file]');
     await cdp(tabId, 'DOM.setFileInputFiles', { files: files, objectId: objectId });

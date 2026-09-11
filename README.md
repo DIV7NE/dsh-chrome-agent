@@ -58,14 +58,14 @@ with the same extension id the options page shows.
 | Tool | What it does |
 |---|---|
 | `chrome_status` | Is the extension connected, and which build. |
-| `chrome_tabs` | Every open tab: id, title, url, which is active. |
+| `chrome_tabs` | Every open tab: id, title, url, which is active, and whether it is the agent's own (`agent: true|false`). |
 | `chrome_open` | Navigate a tab, or open a new one. |
 | `chrome_snapshot` | The page as a text tree of interactive elements, each with `[ref=N]`. |
 | `chrome_click` | Click by `ref`, CSS selector, or coordinates. |
 | `chrome_type` | Type into an element (or the focused one); optional Enter. |
 | `chrome_key` | One key or chord, e.g. `Enter`, `PageDown`, `Control+a`. |
 | `chrome_eval` | Evaluate JavaScript in the page. |
-| `chrome_screenshot` | The visible area, saved to a path: PNG, or JPEG when the capture is large enough to need re-encoding. |
+| `chrome_screenshot` | The visible area, saved to a path: PNG, or JPEG when the capture is large enough to need re-encoding. The result reports which format it encoded. |
 
 The loop is the same one every browser agent uses: `chrome_snapshot`, then act on
 a ref. **A ref is only valid until the next snapshot** — the page re-numbers them.
@@ -76,9 +76,10 @@ Snapshots read `iframe`s as well as the top page. A ref from inside a frame is
 written `[ref=7 frame=f1]`, and it has to be passed back with `frame: "f1"` — a
 ref with no frame means the main page, so every existing call is unchanged at the
 price of one optional argument. `chrome_find` searches every frame and labels a
-hit with `[f1]`, but `chrome_page_text` stays main-page only, because frame text
-is usually widget and banner noise. At most **12 frames** are read; the rest are
-reported as not read.
+hit from inside a frame, but `chrome_page_text` stays main-page only, because
+frame text is usually widget and banner noise. At most **12 frames** are read; a
+snapshot or a find reports how many further frames it did not read, and which
+frames it could not read at all.
 
 ## It works in the background
 
@@ -86,6 +87,12 @@ Every tab the agent opens lands in a **tab group called "DSH Chrome Agent"**, an
 opening one **does not move your view**: the tab is created inactive, loads, and
 is drivable in place. You can collapse the group and forget it, or open it to
 watch. Closing the group closes the agent's work; your own tabs are untouched.
+
+Screenshots follow the same rule — the agent sees a background tab without
+bringing it forward. Only if a background capture genuinely cannot be produced
+does it fall back to activating the tab, which is a last resort rather than the
+default. A tab Chrome has discarded to save memory is reloaded first, because a
+discarded tab has no renderer to capture.
 
 ### Which tab a command acts on
 
@@ -103,12 +110,6 @@ The options page's **Only work in the agent's own tabs** switch confines every
 command to the group the agent opened. It is **off by default**, because the whole
 point of this plugin is driving the tabs you are already signed in to; with it on,
 a command naming one of your tabs is refused instead.
-
-Screenshots follow the same rule — the agent sees a background tab without
-bringing it forward. Only if a background capture genuinely cannot be produced
-does it fall back to activating the tab, which is a last resort rather than the
-default. A tab Chrome has discarded to save memory is reloaded first, because a
-discarded tab has no renderer to capture.
 
 ### The one exception: key presses
 

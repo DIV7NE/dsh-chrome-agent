@@ -35,6 +35,8 @@
 | `extension/options.html`, `extension/options.js` (modify) | The `confineToAgentTabs` toggle. |
 | `src/index.ts` (modify) | `tabId` descriptions, `frame` parameters, the `agent` flag, screenshot format to file extension. |
 | `test/pure.test.mjs` (create) | Hermetic tests for `pure.js`. |
+| `test/probe-worker.mjs` (existing) | The classic-parse gate for the worker: runs its registration-time code against Chrome API stubs. |
+| `test/probe-eval-contract.mjs` (existing) | Mirrors the `eval` wrapper and checks each live-suite expression against a correct and a wrong page state. |
 | `test/live-extension.mjs` (modify) | Live acceptance checks. |
 | `README.md` (modify) | The new default, the setting, the SSH tunnel recipe. |
 
@@ -1423,9 +1425,15 @@ npx tsc --noEmit                       # exit 0
 node --check extension/service-worker.js
 node --check extension/options.js
 node --check extension/pure.js
-npm test                               # 0 failures, including the new pure tests
+npm test                               # 0 failures: pure tests plus the eval-contract probe
 npm run install:profile                # repack and install into the web profile
 ```
+
+`package.json` sets `"type": "module"`, so `node --check extension/service-worker.js`
+parses the worker under ESM rules even though Chrome loads it as a classic script;
+it is a cheap smoke check, not the real gate. The real classic-parse gate is
+`node test/probe-worker.mjs <repo root>`: it evaluates the worker as a sloppy-mode
+script through a real `importScripts` shim, which is the shape Chrome uses.
 
 Then reload the extension, restart the DSH server, point the extension's options port at the test port, and run:
 

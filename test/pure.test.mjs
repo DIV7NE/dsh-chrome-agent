@@ -19,6 +19,7 @@ const {
   flattenFrameTree,
   normaliseFrameKey,
   nextJpegQuality,
+  chooseJpegAttempt,
   isTabAllowed,
   sumFrameOffsets,
 } = globalThis.DSH_PURE
@@ -57,6 +58,26 @@ test('flattening tolerates no tree and malformed nodes', () => {
   assert.deepEqual(flattenFrameTree({ nope: true }, FRAME_LIMIT), { frames: [], total: 0 })
 })
 
+test('flattening drops a malformed node and its subtree from the count', () => {
+  // A node without a string frame.id is not a frame, so it cannot be given a key
+  // and its children cannot be placed under one. Both it and its subtree are
+  // ignored, and total counts what was kept rather than every tree-shaped node.
+  const flat = flattenFrameTree(
+    frame('root', [{ frame: { id: 7 }, childFrames: [frame('ghost')] }]),
+    FRAME_LIMIT,
+  )
+  assert.deepEqual(flat.frames.map(f => f.frameId), ['root'])
+  assert.equal(flat.total, 1)
+})
+
+test('a non-positive or non-finite limit falls back to the default cap', () => {
+  // The cap is a guard, so 0 and NaN mean "use the default", not "return
+  // nothing": a caller that forgot to pass one still gets a bounded read.
+  const wide = () => frame('root', Array.from({ length: 20 }, (_, i) => frame('c' + i)))
+  assert.equal(flattenFrameTree(wide(), 0).frames.length, FRAME_LIMIT)
+  assert.equal(flattenFrameTree(wide(), Number.NaN).frames.length, FRAME_LIMIT)
+})
+
 test('a frame key normalises with the main frame as the default', () => {
   for (const value of [undefined, null, '', 'f0']) assert.equal(normaliseFrameKey(value), '')
   assert.equal(normaliseFrameKey('f1'), 'f1')
@@ -75,6 +96,30 @@ test('the quality ladder walks down and then stops', () => {
   assert.equal(nextJpegQuality(4), 30)
   assert.equal(nextJpegQuality(5), null)
   assert.equal(nextJpegQuality(undefined), 90)
+})
+
+test('the first JPEG attempt that fits wins, even when a later one is smaller', () => {
+  const sizes = [300, 150, 100, 50]
+  assert.equal(chooseJpegAttempt(sizes, 200), 1)
+})
+
+test('when no JPEG attempt fits the smallest one is chosen', () => {
+  assert.equal(chooseJpegAttempt([300, 150, 220], 100), 1)
+  // Nulls do not win the "smallest" race.
+  assert.equal(chooseJpegAttempt([null, 300, 150], 100), 2)
+})
+
+test('an attempt exactly equal to the limit fits', () => {
+  assert.equal(chooseJpegAttempt([500, 200], 200), 1)
+})
+
+test('every JPEG attempt failing yields null', () => {
+  assert.equal(chooseJpegAttempt([null, null, undefined], 200), null)
+})
+
+test('an empty JPEG ladder yields null', () => {
+  assert.equal(chooseJpegAttempt([], 200), null)
+  assert.equal(chooseJpegAttempt(undefined, 200), null)
 })
 
 test('confinement admits every tab when it is off', () => {

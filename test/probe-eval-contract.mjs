@@ -14,6 +14,10 @@
  * state (must PASS) and a wrong one (must FAIL). The OLD* cases show the
  * double-serialising expressions the suite used before, for comparison.
  *
+ * Its copy of the wrapper mirrors the `eval` command in
+ * extension/service-worker.js and must be kept in step with it: if the real
+ * wrapper changes, these expressions stop proving anything about the bridge.
+ *
  * Exit 0 means every current expression passes on the correct state and fails on
  * the wrong state.
  */

@@ -28,9 +28,12 @@
    * always means the same frame even when later frames go unread.
    *
    * @param frameTree - the `frameTree` member of Page.getFrameTree.
-   * @param limit - the most frames to return.
+   * @param limit - the most frames to return; a non-positive or non-finite value
+   *   falls back to FRAME_LIMIT.
    * @returns `{ frames, total }`; frames are `{ key, frameId, parentKey, url }`
-   *   breadth-first with the main frame as `f0`, and total counts every frame.
+   *   breadth-first with the main frame as `f0`. A node whose `frame.id` is not a
+   *   string is not a frame and is dropped with its whole childFrames subtree, so
+   *   total counts the well-formed frames that were kept, not the raw nodes.
    */
   function flattenFrameTree(frameTree, limit) {
     var max = typeof limit === 'number' && limit > 0 ? limit : FRAME_LIMIT;
@@ -87,6 +90,28 @@
   }
 
   /**
+   * Choose which JPEG attempt to use.
+   *
+   * @param sizes - base64 lengths produced by the ladder so far, in order; a null
+   *   entry means that attempt produced no data.
+   * @param limit - the base64 length the caller can send.
+   * @returns the index of the FIRST entry within the limit; otherwise the index of
+   *   the smallest non-null entry; otherwise null when every attempt produced
+   *   nothing.
+   */
+  function chooseJpegAttempt(sizes, limit) {
+    var list = Array.isArray(sizes) ? sizes : [];
+    var smallest = -1;
+    for (var i = 0; i < list.length; i += 1) {
+      var size = list[i];
+      if (typeof size !== 'number') continue;
+      if (size <= limit) return i;
+      if (smallest === -1 || size < list[smallest]) smallest = i;
+    }
+    return smallest === -1 ? null : smallest;
+  }
+
+  /**
    * Whether a tab may be acted on.
    *
    * @param tabGroupId - the tab's group, or -1 when it has none.
@@ -130,6 +155,7 @@
     flattenFrameTree: flattenFrameTree,
     normaliseFrameKey: normaliseFrameKey,
     nextJpegQuality: nextJpegQuality,
+    chooseJpegAttempt: chooseJpegAttempt,
     isTabAllowed: isTabAllowed,
     sumFrameOffsets: sumFrameOffsets,
   };

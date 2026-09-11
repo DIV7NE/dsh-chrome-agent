@@ -126,13 +126,18 @@ honoured verbatim, because the caller asked for that exact path.
 
 ### Enumeration
 
-`Page.getFrameTree` walks the frame tree. Each frame (main frame included) gets an
-execution context from `Page.createIsolatedWorld({ frameId, worldName:
-'dsh-agent-snapshot' })`, and the existing snapshot expression is evaluated there
-with `Runtime.evaluate({ expression, contextId, returnByValue: true })`. An
-isolated world is used rather than the page's own context so a page that redefines
-globals cannot break the walk, and CDP is not subject to same-origin, so
-cross-origin frames work.
+`Page.getFrameTree` walks the frame tree. Each **child** frame gets an execution
+context from `Page.createIsolatedWorld({ frameId, worldName:
+'dsh-agent-snapshot' })`, and the snapshot expression is evaluated there with
+`Runtime.evaluate({ expression, contextId, returnByValue: true })`. The **main**
+frame is deliberately left in the page's own world instead: the snapshot parks its
+refs in `window.__dshChromeRefs`, and every ref consumer (click, type, scroll,
+hover, upload, drag) resolves them through the page's own context, so reading the
+main frame in an isolated world would leave every main-frame ref unreachable. That
+was a Critical fix during implementation, and this record matches the shipped
+code. An isolated world is used for child frames so a page that redefines globals
+cannot break the walk, and CDP is not subject to same-origin, so cross-origin
+frames work.
 
 At most **12 frames** are read; the rest are reported as
 `… N further frames not read`.
@@ -220,8 +225,9 @@ directly, so there is one implementation and no `chrome.*` dependency:
   parent's key, and the total reported even when the list is capped.
 - `normaliseFrameKey`: absent, `''`, `null` and `f0` all mean the main frame;
   `f1` and `f12` pass; `1`, `fx` and `f0a` are rejected.
-- the quality ladder: given an oversize PNG it picks the first JPEG that fits, and
-  the smallest when none fits.
+- the quality ladder: `nextJpegQuality` walks down and stops; `chooseJpegAttempt`
+  picks the first JPEG that fits (even when a later one is smaller), the smallest
+  when none fits, and null when every attempt produced nothing.
 - the confinement predicate: an agent-group tab passes, a foreign tab is refused,
   and `confineToAgentTabs: false` admits both.
 
@@ -250,7 +256,7 @@ suite without a test-only command, which is not worth adding.
 | `extension/service-worker.js` | `importScripts`; `resolveTabId` rewrite; `currentTabId` state; confinement check; screenshot format and guard; frame enumeration, ref parsing, offset accumulation; `find` fan-out |
 | `extension/options.html`, `extension/options.js` | the `confineToAgentTabs` toggle |
 | `src/index.ts` | `tabId` descriptions; `chrome_tabs` `agent` flag; screenshot format to file extension |
-| `test/bridge.test.mjs` | hermetic tests for the pure helpers |
+| `test/pure.test.mjs` | hermetic tests for the pure helpers |
 | `test/live-extension.mjs` | the live checks above |
 | `README.md` | the new default, the setting, the SSH tunnel recipe |
 

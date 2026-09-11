@@ -238,10 +238,26 @@ try {
     String(implicit.result).indexOf('agent=1') !== -1, implicit);
 
   await call('close', { tabId: agentTab.tabId });
+  // The remembered tab is cleared by tabs.onRemoved, which is asynchronous: a bare
+  // command sent the instant after close can still see the closed id and fail with
+  // "No tab with id" instead of "no tab yet". Both mean nothing resolved; what
+  // must never happen is a success, which would mean a bare command reached a tab
+  // the agent did not open. Retry so the listener has time to catch up.
   let noTabError = '';
-  try { await call('eval', { expression: 'location.search' }); } catch (error) { noTabError = String(error.message); }
+  let bareValue = null;
+  const targetingDeadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      bareValue = await call('eval', { expression: 'location.search' });
+      break;
+    } catch (error) {
+      noTabError = String(error.message);
+      if (/no tab yet/.test(noTabError) || Date.now() > targetingDeadline) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
   check('with the remembered tab closed a bare command fails instead of using the user tab',
-    /no tab yet/.test(noTabError), noTabError);
+    bareValue === null && /no tab yet/.test(noTabError), { bareValue, noTabError });
 
   await call('close', { tabId: userTab.tabId });
 
@@ -253,8 +269,12 @@ try {
   // The agent's own tabs all share one group; anything outside it is the user's.
   const foreign = listing.filter(t => t.groupId !== own.groupId);
   check('a tab the agent opened is reported as its own', own && own.agent === true, own);
+  // Whether the user happens to have a tab outside the group is not this check's
+  // business; when one exists it must not be marked as the agent's. A browser
+  // whose only tabs are the agent's own must not fail it, so the count is
+  // reported separately rather than required to be non-zero.
   check('a tab outside the agent group is not marked as the agent\'s',
-    foreign.length > 0 && foreign.every(t => t.agent === false), foreign.slice(0, 3));
+    foreign.every(t => t.agent === false), { foreignCount: foreign.length, foreign: foreign.slice(0, 3) });
   await call('close', { tabId: ownTab.tabId });
 
   // --- agent cursor -----------------------------------------------------------

@@ -437,7 +437,9 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Read the page as a compact text tree of interactive elements, each annotated with a ref like [ref=7]. '
       + 'This is the primary way to see a page — read the snapshot, then pass a ref to chrome_click or chrome_type. '
-      + 'Cheaper and more reliable than a screenshot for anything but layout and images.',
+      + 'Cheaper and more reliable than a screenshot for anything but layout and images. '
+      + 'A ref from inside a frame is written [ref=7 frame=f1] and must be passed back with frame: "f1"; '
+      + 'chrome_page_text stays main-page only.',
     parameters: {
       tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
     },
@@ -783,13 +785,21 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         properties: {
           count: { type: 'integer', required: true },
           matches: { type: 'array', required: true, items: { type: 'string' } },
+          skipped: { type: 'integer', required: true, description: 'Frames the 12-frame cap left unread.' },
+          unread: { type: 'array', required: true, items: { type: 'string' }, description: 'Frame keys that were in range but could not be read.' },
         },
       },
-      render: textRender<{ count: number; matches: string[] }>(v => v.count === 0
-        ? 'No matches.'
-        : v.count + ' match(es):\n' + v.matches.map(m => '  …' + m + '…').join('\n')),
+      render: textRender<{ count: number; matches: string[]; skipped: number; unread: string[] }>(v => {
+        const head = v.count === 0
+          ? 'No matches.'
+          : v.count + ' match(es):\n' + v.matches.map(m => '  …' + m + '…').join('\n')
+        const notes: string[] = []
+        if (v.skipped > 0) notes.push(v.skipped + ' further frame(s) not read')
+        if (v.unread.length > 0) notes.push(v.unread.length + ' frame(s) could not be read (' + v.unread.join(', ') + ')')
+        return notes.length === 0 ? head : head + '\n\n… ' + notes.join('; ')
+      }),
     },
-    execute: async (args: { text: string; tabId?: number }) => bridge.call<{ count: number; matches: string[] }>('find', args),
+    execute: async (args: { text: string; tabId?: number }) => bridge.call<{ count: number; matches: string[]; skipped: number; unread: string[] }>('find', args),
   }))
 
   register(defineTool({
