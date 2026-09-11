@@ -220,6 +220,24 @@ try {
   const afterClick = (await call('tabs')).find(t => t.id === bgA.tabId);
   check('a click does not steal the view', !!afterClick && afterClick.active === false, afterClick);
 
+  // Targeting: a command with no tabId must use the agent's own tab. The old
+  // fallback was "the active tab of the last focused window", which means a bare
+  // call could click whatever the user happened to be looking at.
+  console.log('tab targeting');
+  const userTab = await call('open', { url: 'https://example.com/?user=1', newTab: true });
+  const agentTab = await call('open', { url: 'https://example.com/?agent=1', newTab: true });
+  const implicit = await call('eval', { expression: 'location.search' });
+  check('a command without a tabId uses the agent tab it opened last',
+    String(implicit.result).indexOf('agent=1') !== -1, implicit);
+
+  await call('close', { tabId: agentTab.tabId });
+  let noTabError = '';
+  try { await call('eval', { expression: 'location.search' }); } catch (error) { noTabError = String(error.message); }
+  check('with no agent tab left a bare command fails instead of using the user tab',
+    /no tab yet/.test(noTabError), noTabError);
+
+  await call('close', { tabId: userTab.tabId });
+
   // --- agent cursor -----------------------------------------------------------
   console.log('');
   console.log('agent cursor');

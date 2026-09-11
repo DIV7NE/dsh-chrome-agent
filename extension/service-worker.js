@@ -34,6 +34,11 @@ let retryDelayMs = 3000;
 /** Every tab this worker currently holds a debugger attachment on. */
 const attached = new Set();
 
+/** The tab the agent is working in, and whether storage has been read yet. */
+let currentTabId = null;
+let currentTabLoaded = false;
+const CURRENT_TAB_KEY = 'currentTabId';
+
 /** The DSH server port, from storage (the options page writes it). */
 async function serverPort() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT });
@@ -118,13 +123,52 @@ function describe(error) {
 
 // ---------------------------------------------------------------- tabs ---
 
-/** Resolve the tab a command acts on: the named one, else the active tab. */
+/**
+ * The tab the agent is working in, read from session storage once per worker.
+ *
+ * Session storage rather than memory alone because Chrome evicts an idle
+ * service worker, and losing the tab on every eviction would make every
+ * follow-up call fail for no reason the caller can see.
+ */
+async function readCurrentTabId() {
+  if (!currentTabLoaded) {
+    currentTabLoaded = true;
+    try {
+      const stored = await chrome.storage.session.get(CURRENT_TAB_KEY);
+      if (typeof stored[CURRENT_TAB_KEY] === 'number') currentTabId = stored[CURRENT_TAB_KEY];
+    } catch (error) {
+      // Session storage is best effort; memory alone still works this session.
+    }
+  }
+  return currentTabId;
+}
+
+/** Record the tab the agent is working in, in memory and for the next worker. */
+function rememberTab(tabId) {
+  currentTabId = tabId;
+  currentTabLoaded = true;
+  chrome.storage.session.set({ [CURRENT_TAB_KEY]: tabId }).catch(() => {});
+}
+
+/**
+ * Resolve the tab a command acts on: the named one, else the tab the agent is
+ * already working in.
+ *
+ * There is deliberately no "the user's active tab" fallback. Guessing there
+ * means a command sent without a tabId can act on whatever the user happens to
+ * be looking at; failing loudly is the safe answer, and passing a tabId is how a
+ * caller reaches a tab the agent did not open.
+ */
 async function resolveTabId(tabId) {
-  if (typeof tabId === 'number') return tabId;
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const active = tabs[0];
-  if (!active || typeof active.id !== 'number') throw new Error('no active tab to act on');
-  return active.id;
+  if (typeof tabId === 'number') {
+    rememberTab(tabId);
+    return tabId;
+  }
+  const remembered = await readCurrentTabId();
+  if (remembered === null) {
+    throw new Error('no tab yet — call chrome_open first, or pass an explicit tabId');
+  }
+  return remembered;
 }
 
 // ----------------------------------------------------------- debugger ---
@@ -260,6 +304,11 @@ chrome.tabs.onRemoved.addListener(tabId => {
   cursorAt.delete(tabId);
   consoleByTab.delete(tabId);
   networkByTab.delete(tabId);
+  if (currentTabId === tabId) {
+    currentTabId = null;
+    currentTabLoaded = true;
+    chrome.storage.session.remove(CURRENT_TAB_KEY).catch(() => {});
+  }
 });
 
 /** Send one CDP command on a tab. */
@@ -827,6 +876,7 @@ const COMMANDS = {
       await chrome.tabs.update(tabId, { url: url });
     }
     if (typeof tabId !== 'number') throw new Error('could not determine the target tab');
+    rememberTab(tabId);
     await waitForLoad(tabId, 20000);
     return describeTab(tabId);
   },
