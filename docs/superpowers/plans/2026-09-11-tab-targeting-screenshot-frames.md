@@ -713,7 +713,9 @@ git commit -m "feat: optional confinement to the agent's tab group"
 In `test/live-extension.mjs`, after the existing `screenshot` check:
 
 ```js
-const shotInfo = await call('screenshot', { tabId: cap.tabId });
+// Use a tab that is in scope HERE. cap is declared much later in the suite, so the
+// original snippet's cap.tabId would be a ReferenceError at this anchor.
+const shotInfo = await call('screenshot', { tabId: opened.tabId });
 check('a screenshot reports the format it was encoded in',
   shotInfo.format === 'png' || shotInfo.format === 'jpeg', shotInfo.format);
 ```
