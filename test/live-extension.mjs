@@ -318,7 +318,9 @@ try {
   const pageHtml = '<div style="height:3000px">tall</div>'
     + '<button id="b" style="width:120px;height:40px">B</button>'
     + '<input id="f" type="file">'
-    + '<div id="box" style="width:80px;height:80px;background:#ccc">box</div>';
+    // role=button + tabindex make #box genuinely interactive, so chrome_snapshot
+    // lists it and the scroll-to-ref and drag checks below have a real ref.
+    + '<div id="box" role="button" tabindex="0" style="width:80px;height:80px;background:#ccc">box</div>';
   const install = [
     '(function () {',
     '  document.body.innerHTML = ' + JSON.stringify(pageHtml) + ';',
@@ -457,7 +459,15 @@ try {
   const sized = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
   check('resize changes the layout width', Number(sized.result) === 420, sized);
   await call('resize', { width: 0, height: 0, tabId: cap.tabId });
-  const cleared = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
+  // The renderer applies the cleared override asynchronously, so poll briefly
+  // rather than asserting on the first read. The check still fails if the width
+  // never leaves the override.
+  let cleared = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    cleared = await call('eval', { tabId: cap.tabId, expression: 'window.innerWidth' });
+    if (Number(cleared.result) !== 420) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
   check('resize clears again', Number(cleared.result) !== 420, cleared);
 
   const uploadPath = join(tmpdir(), 'dsh-chrome-upload-probe.txt');

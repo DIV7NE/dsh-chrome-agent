@@ -111,7 +111,10 @@ One guard, in the extension's `screenshot` command (`service-worker.js:1077`):
    `SCREENSHOT_BASE64_LIMIT = 2_000_000`, return it.
 2. Otherwise re-capture as JPEG, stepping CDP's `quality` parameter (0–100)
    through `90, 75, 60, 45, 30`, and return the first result that fits.
-3. If none fits, return the smallest produced.
+3. If none fits, return the smallest produced. If no JPEG was produced at all
+   (every attempt was refused or returned no data), keep the oversized PNG and
+   return it with `format: 'png'` — an oversized image is still usable, and
+   turning a size problem into a failure would be worse.
 4. The command returns `{ base64, format }` where `format` is `'png'` or
    `'jpeg'`.
 
@@ -173,6 +176,14 @@ ancestor frame, `DOM.getFrameOwner({ frameId })` gives the frame's element, and
 `DOM.getBoxModel` gives that element's box in its own parent. Summing the chain
 yields the offset the click needs. `DOM.enable` is already on
 (`ensureAttached`, `service-worker.js:126`).
+
+The frame element can itself be scrolled out of the top page's viewport, so
+before the offsets are read, each ancestor frame is brought into view —
+outermost first, via `DOM.getFrameOwner` then `DOM.scrollIntoViewIfNeeded` —
+and the box-model read afterwards reflects that position. `scrollIntoView`
+inside the frame scrolls the frame's own content, not the frame element in the
+top page, so without this a click is dispatched at a negative y where nothing
+receives it.
 
 If any offset in the chain cannot be determined (the frame's owner element is
 `display: none`, or an ancestor has no box model), the command **fails with a

@@ -119,7 +119,9 @@
    * @param confine - true when the user asked for confinement.
    */
   function isTabAllowed(tabGroupId, agentGroupId, confine) {
-    if (confine !== true) return true;
+    // Fail closed: any truthy value confines, so a stored '1' or 'true' string
+    // cannot silently turn confinement off.
+    if (!confine) return true;
     if (typeof agentGroupId !== 'number') return false;
     return tabGroupId === agentGroupId;
   }

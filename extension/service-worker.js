@@ -157,6 +157,9 @@ async function loadCurrentTabId() {
       // A tab can close while no worker is alive to hear about it, so a stored
       // id is a claim to check, not a fact.
       await chrome.tabs.get(storedId);
+      // A rememberTab can land during the await above; re-check so its tab is
+      // not overwritten by the stored one now that the read has finished.
+      if (currentTabLoaded) return;
       currentTabId = storedId;
     } catch (error) {
       currentTabId = null;
@@ -188,7 +191,9 @@ function rememberTab(tabId) {
  */
 async function assertTabAllowed(tabId) {
   const stored = await chrome.storage.local.get({ confineToAgentTabs: false });
-  if (stored.confineToAgentTabs !== true) return;
+  // Fail closed like isTabAllowed: any truthy stored value confines, so a
+  // non-boolean '1' or 'true' cannot slip past this gate before the predicate.
+  if (!stored.confineToAgentTabs) return;
   let tabGroupId = -1;
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -618,6 +623,27 @@ function pointExpressionFor(params, prefix) {
 async function frameOffsetFor(tabId, frames, frameKey) {
   const byKey = {};
   for (let i = 0; i < frames.length; i += 1) byKey[frames[i].key] = frames[i];
+  // The frame element can itself be scrolled out of the top page's viewport.
+  // el.scrollIntoView inside pointExpressionFor scrolls the frame's own content,
+  // never the frame element, so a box-model read here would report a negative y
+  // and CDP would dispatch the click outside the viewport, where nothing
+  // receives it. Bring each ancestor frame into view, outermost first, so the
+  // box-model reads below reflect the post-scroll position.
+  const chain = [];
+  for (let current = byKey[frameKey]; current && current.parentKey; current = byKey[current.parentKey]) {
+    chain.push(current);
+  }
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    try {
+      const owner = await cdp(tabId, 'DOM.getFrameOwner', { frameId: chain[i].frameId });
+      if (owner && typeof owner.backendNodeId === 'number') {
+        await cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId: owner.backendNodeId });
+      }
+    } catch (error) {
+      // Best effort: the box-model read below still reports the frame's real
+      // position, and throws if it cannot be determined at all.
+    }
+  }
   const quads = [];
   let current = byKey[frameKey];
   while (current && current.parentKey) {
@@ -1230,7 +1256,9 @@ const COMMANDS = {
         }
         parsed = JSON.parse(raw);
       } catch (error) {
-        unread.push(frame.key);
+        // The message travels with the key so a systemic CDP failure or a detach
+        // is distinguishable from one frame that navigated away.
+        unread.push(frame.key + ': ' + describe(error));
         continue;
       }
       if (isMain) {

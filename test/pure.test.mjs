@@ -109,8 +109,10 @@ test('when no JPEG attempt fits the smallest one is chosen', () => {
   assert.equal(chooseJpegAttempt([null, 300, 150], 100), 2)
 })
 
-test('an attempt exactly equal to the limit fits', () => {
-  assert.equal(chooseJpegAttempt([500, 200], 200), 1)
+test('an attempt exactly equal to the limit fits, ahead of a later smaller one', () => {
+  // The 200 equals the limit and must win over the 150 that also fits; a <= to <
+  // regression would fall through and pick the 150 instead.
+  assert.equal(chooseJpegAttempt([500, 200, 150], 200), 1)
 })
 
 test('every JPEG attempt failing yields null', () => {
@@ -125,6 +127,15 @@ test('an empty JPEG ladder yields null', () => {
 test('confinement admits every tab when it is off', () => {
   assert.equal(isTabAllowed(42, 7, false), true)
   assert.equal(isTabAllowed(-1, 7, false), true)
+})
+
+test('a truthy confine value confines even when it is not boolean true', () => {
+  assert.equal(isTabAllowed(7, 7, 1), true)
+  assert.equal(isTabAllowed(42, 7, 1), false)
+  assert.equal(isTabAllowed(42, 7, 'true'), false)
+  // Other-than-true falsy values leave confinement off, as before.
+  assert.equal(isTabAllowed(42, 7, 0), true)
+  assert.equal(isTabAllowed(42, 7, undefined), true)
 })
 
 test('confinement admits only the agent group when it is on', () => {
