@@ -1125,10 +1125,26 @@ async function ensureLive(tabId) {
  */
 async function ensureVisible(tabId) {
   const tab = await chrome.tabs.get(tabId);
-  if (tab.active) return;
-  await chrome.tabs.update(tabId, { active: true });
-  // Activation is not composited the instant update() resolves; without this
-  // beat the first event can still land on a tab Chrome has not shown yet.
+  if (!tab.active) {
+    await chrome.tabs.update(tabId, { active: true });
+    // Activation is not composited the instant update() resolves; without this
+    // beat the first event can still land on a tab Chrome has not shown yet.
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  const window = await chrome.windows.get(tab.windowId);
+  if (window.focused) return;
+  // In front is not the requirement — being composited is. Measured with this
+  // window visible but behind another app, document.visibilityState was
+  // 'visible' and a click landed in 331ms without the window ever being
+  // focused, so taking the user's focus here would be rude and pointless.
+  // Only a window Chrome is compositing nothing for is a problem: minimised,
+  // or fully covered, its visibilityState reads 'hidden' and the same click
+  // stalled for 5007ms. Ask the page which case this is.
+  if (await evaluate(tabId, 'document.visibilityState === "visible"')) return;
+  // Nothing is being painted, so every mouse event would stall for seconds.
+  // Bringing the window forward is the only way to give it frames, and it
+  // costs the user their focus — which is why it is the last resort.
+  await chrome.windows.update(tab.windowId, { focused: true });
   await new Promise(resolve => setTimeout(resolve, 250));
 }
 
