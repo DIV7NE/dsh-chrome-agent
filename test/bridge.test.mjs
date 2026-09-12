@@ -60,7 +60,9 @@ test('a batch step carries a multi-word tool name into camelCase', () => {
   // chrome_page_text is pageText. Derived once, so a new tool cannot drift.
   assert.equal(resolveBatchStep('chrome_page_text', {}, undefined).method, 'pageText')
   assert.equal(resolveBatchStep('chrome_screenshot', {}, undefined).method, 'screenshot')
-  assert.equal(resolveBatchStep('chrome_wait', { ms: 10 }, undefined).method, 'wait')
+  // chrome_wait_for is the multi-word tool with a trailing word, so it is the
+  // case that catches a prefix cut standing in for a real derivation.
+  assert.equal(resolveBatchStep('chrome_wait_for', { timeout: 10 }, undefined).method, 'waitFor')
 })
 
 test('every batchable tool maps onto a camelCase command', () => {

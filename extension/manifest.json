@@ -3,7 +3,10 @@
   "name": "DSH Chrome Agent",
   "version": "0.1.0",
   "description": "Connects your real, logged-in Chrome to DeepSeek Harness so its agent can read and drive the tabs you already have open.",
+  "short_name": "DSH Chrome Agent",
+  "homepage_url": "https://github.com/deepseek-ai/deepseek-harness",
   "minimum_chrome_version": "116",
+  "minimum_edge_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApbeP6/mjVhlNg3yyIUPO2Y6whmWVUzSZid84ehqXkScIGUBfZiGZ3i3nSFEu7COJkpo7TtvuhDmAiEzZIbmBha4csAHg7If8w7JEUK8KE7adw953sfbcgEJEF1P5HwNDLrq7WHgCphEMK3bx1ppTap9qv+ATRGnFAbLdcEhfi0NXGUsETVC2uPfX5qIeCLUXCXajUhkYQyCVksUWlwRXEXFw76MxigriFVC0Dy+Vn9y8+EguUfRr0rHqPkqPXwtjcf8/Vh7L3lowXajJV08lzFY7qLpl0iKkyDnLsRNsjA3xHFNvL5e+c4GalaSjzcYNq8zP6Mr6qNdUYIsfIoGMzwIDAQAB",
   "background": {
     "service_worker": "service-worker.js"
@@ -13,11 +16,22 @@
     "tabs",
     "tabGroups",
     "storage",
-    "alarms",
-    "activeTab"
+    "alarms"
   ],
   "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "DSH Chrome Agent"
+    "default_title": "DSH Chrome Agent",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   }
 }

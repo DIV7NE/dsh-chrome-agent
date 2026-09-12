@@ -53,6 +53,30 @@ the agent can see your tabs.
 Ask the agent to run `chrome_status`. It should report the extension connected,
 with the same extension id the options page shows.
 
+### Sharing the extension with someone else
+
+There is no Chrome Web Store listing, and none is needed: the manifest carries a
+fixed `key`, so Chrome derives this extension's id from that key rather than
+from the folder it was loaded out of. An unpacked install therefore gets the
+**same id** the DSH server expects, and is a first-class install rather than a
+degraded one. Move or rename the folder and the id does not change.
+
+Send them the repository (or a release zip), and they run the same four steps
+above. What they take on:
+
+| Trade-off | Detail |
+|---|---|
+| No automatic updates | Chrome never updates an unpacked extension. Re-download and click **Reload** in `chrome://extensions`. |
+| Developer mode required | A dismissible "Disable developer mode extensions" prompt appears on startup. |
+| No store discovery | There is nothing to search for; the link is how it spreads. |
+
+To cut a shareable zip, `npm run pack:webstore` writes
+`dsh-chrome-agent-webstore.zip` — the extension at the zip root, with no
+sources, tests, or `node_modules`. Unzip it and point **Load unpacked** at the
+resulting folder. See [SHARING-WITHOUT-STORE.md](SHARING-WITHOUT-STORE.md) for
+the full picture, and [STORE-LISTING.md](STORE-LISTING.md) if you later decide
+to pay the one-time Chrome Web Store fee.
+
 ## Tools
 
 | Tool | What it does |

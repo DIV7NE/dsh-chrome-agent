@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs && node test/probe-eval-contract.mjs",
-    "install:profile": "node scripts/install-profile.mjs"
+    "install:profile": "node scripts/install-profile.mjs",
+    "pack:webstore": "node scripts/pack-webstore.mjs"
   },
   "dsh": {
     "bundle": {

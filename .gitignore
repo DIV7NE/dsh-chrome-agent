@@ -2,3 +2,6 @@ node_modules/
 lib/
 dist/
 *.tgz
+
+# Build artifact: regenerate with 'npm run pack:webstore', attached to Releases.
+dsh-chrome-agent-webstore.zip
