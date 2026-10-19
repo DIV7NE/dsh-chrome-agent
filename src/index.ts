@@ -283,6 +283,46 @@ function bullet(items: string[]): string {
   return items.length === 0 ? '(none)' : items.join('\n')
 }
 
+/** The parameters of every action that can open a JavaScript dialog. */
+const DIALOG_PARAMETERS = {
+  dialog: {
+    type: 'string',
+    enum: ['accept', 'dismiss'],
+    description: 'How to answer a JavaScript dialog this action opens. By default an alert is accepted (it only has OK) '
+      + 'and a confirm or prompt is dismissed, so nothing is agreed to unasked; every dialog is reported in the result, '
+      + 'and you can repeat the action with "accept" to answer OK. Leaving or closing a page that asks before it is left '
+      + '(unsaved changes) is refused unless this is "accept".',
+  },
+  promptText: { type: 'string', description: 'The answer to a prompt() dialog, when dialog is "accept".' },
+} as const
+
+/** The output property those actions report their dialogs in. */
+const DIALOGS_OUTPUT = {
+  type: 'array',
+  description: 'JavaScript dialogs answered since the last report.',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      tabId: { type: 'integer', required: true },
+      type: { type: 'string', required: true },
+      message: { type: 'string', required: true },
+      accepted: { type: 'boolean', required: true },
+    },
+  },
+} as const
+
+/** A dialog the extension answered. */
+interface DialogReport { tabId: number; type: string; message: string; accepted: boolean }
+
+/** The lines telling the model which dialogs appeared and how they were answered. */
+function dialogNote(value: { dialogs?: DialogReport[] }): string {
+  if (!Array.isArray(value.dialogs)) return ''
+  return value.dialogs.map(d => '\nA ' + d.type + ' dialog appeared in tab ' + d.tabId + ': ' + JSON.stringify(d.message)
+    + (d.accepted ? ' — it was accepted.' : ' — it was dismissed. Repeat the action with dialog: "accept" to answer OK instead.'),
+  ).join('')
+}
+
 /**
  * A compact, JSON-safe summary of one action's value. Batch results are strings
  * because the schema requires JSON values and the model reads them as text; a
@@ -396,6 +436,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       url: { type: 'string', required: true, description: 'Absolute http(s) URL to open.' },
       tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
       newTab: { type: 'boolean', description: 'Open a new tab instead of reusing one.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
@@ -405,13 +446,14 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
           tabId: { type: 'integer', required: true },
           url: { type: 'string', required: true },
           title: { type: 'string', required: true },
+          dialogs: DIALOGS_OUTPUT,
         },
       },
-      render: textRender<{ tabId: number; url: string; title: string }>(v =>
-        'Opened tab ' + v.tabId + ': ' + v.title + ' (' + v.url + ')',
+      render: textRender<{ tabId: number; url: string; title: string; dialogs?: DialogReport[] }>(v =>
+        'Opened tab ' + v.tabId + ': ' + v.title + ' (' + v.url + ')' + dialogNote(v),
       ),
     },
-    execute: async (args: { url: string; tabId?: number; newTab?: boolean }, exec) => {
+    execute: async (args: { url: string; tabId?: number; newTab?: boolean; dialog?: string; promptText?: string }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('open', args)
     },
@@ -466,6 +508,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
       },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
@@ -473,9 +516,12 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         additionalProperties: false,
         properties: {
           clicked: { type: 'string', required: true, description: 'What was clicked, as the extension described it.' },
+          dialogs: DIALOGS_OUTPUT,
         },
       },
-      render: textRender<{ clicked: string }>(v => 'Clicked ' + v.clicked + '. Take a fresh chrome_snapshot to see the result.'),
+      render: textRender<{ clicked: string; dialogs?: DialogReport[] }>(v =>
+        'Clicked ' + v.clicked + '. Take a fresh chrome_snapshot to see the result.' + dialogNote(v),
+      ),
     },
     execute: async (args: {
       ref?: number
@@ -486,6 +532,8 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       clicks?: number
       frame?: string
       tabId?: number
+      dialog?: string
+      promptText?: string
     }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ clicked: string }>('click', args)
@@ -510,6 +558,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
         description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
       },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
@@ -520,15 +569,26 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
           submitted: { type: 'boolean', required: true },
           value: { type: 'string', required: true, description: 'What the field holds after typing (a password shows only its length).' },
           matches: { type: 'boolean', required: true, description: 'Whether the field contains what was typed.' },
+          dialogs: DIALOGS_OUTPUT,
         },
       },
-      render: textRender<{ typed: boolean; submitted: boolean; value: string; matches: boolean }>(v =>
+      render: textRender<{ typed: boolean; submitted: boolean; value: string; matches: boolean; dialogs?: DialogReport[] }>(v =>
         (v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.')
         + ' The field now reads: ' + JSON.stringify(v.value) + '.'
-        + (v.matches ? '' : ' WARNING: that is not what was typed — the page reformatted, truncated or rejected it.'),
+        + (v.matches ? '' : ' WARNING: that is not what was typed — the page reformatted, truncated or rejected it.')
+        + dialogNote(v),
       ),
     },
-    execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; frame?: string; tabId?: number }, exec) => {
+    execute: async (args: {
+      text: string
+      ref?: number
+      selector?: string
+      submit?: boolean
+      frame?: string
+      tabId?: number
+      dialog?: string
+      promptText?: string
+    }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('type', args)
     },
@@ -543,16 +603,18 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     parameters: {
       key: { type: 'string', required: true, description: 'Key or chord, e.g. "Tab", "Control+Enter".' },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { pressed: { type: 'string', required: true } },
+        properties: { pressed: { type: 'string', required: true }, dialogs: DIALOGS_OUTPUT },
       },
-      render: textRender<{ pressed: string }>(v => 'Pressed ' + v.pressed + '.'),
+      render: textRender<{ pressed: string; dialogs?: DialogReport[] }>(v => 'Pressed ' + v.pressed + '.' + dialogNote(v)),
     },
-    execute: async (args: { key: string; tabId?: number }) => bridge.call<{ pressed: string }>('key', args),
+    execute: async (args: { key: string; tabId?: number; dialog?: string; promptText?: string }) =>
+      bridge.call<{ pressed: string }>('key', args),
   }))
 
   register(defineTool({
@@ -563,16 +625,17 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     parameters: {
       expression: { type: 'string', required: true, description: 'A JavaScript expression. Wrap multi-statement work in an IIFE.' },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: { result: { type: 'string', required: true }, dialogs: DIALOGS_OUTPUT },
       },
-      render: textRender<{ result: string }>(v => v.result),
+      render: textRender<{ result: string; dialogs?: DialogReport[] }>(v => v.result + dialogNote(v)),
     },
-    execute: async (args: { expression: string; tabId?: number }, exec) => {
+    execute: async (args: { expression: string; tabId?: number; dialog?: string; promptText?: string }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('eval', args)
     },
@@ -584,16 +647,17 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       'Close a tab. Use it to tidy up tabs you opened; do not close a tab the user was already using unless they asked.',
     parameters: {
       tabId: { type: 'integer', required: true, description: 'Tab id from chrome_tabs or chrome_open.' },
+      ...DIALOG_PARAMETERS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { closed: { type: 'integer', required: true } },
+        properties: { closed: { type: 'integer', required: true }, dialogs: DIALOGS_OUTPUT },
       },
-      render: textRender<{ closed: number }>(v => 'Closed tab ' + v.closed + '.'),
+      render: textRender<{ closed: number; dialogs?: DialogReport[] }>(v => 'Closed tab ' + v.closed + '.' + dialogNote(v)),
     },
-    execute: async (args: { tabId: number }, exec) => {
+    execute: async (args: { tabId: number; dialog?: string; promptText?: string }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call<{ closed: number }>('close', args)
     },

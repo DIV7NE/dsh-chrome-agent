@@ -122,8 +122,13 @@ function handleFrame(raw) {
 
 /** A short, safe message for the host. */
 function describe(error) {
-  if (error && typeof error.message === 'string' && error.message !== '') return error.message;
-  return String(error);
+  const message = error && typeof error.message === 'string' && error.message !== '' ? error.message : String(error);
+  if (/detached/i.test(message) && lastDetach && Date.now() - lastDetach.at < 5000) {
+    // 'canceled_by_user' is the user pressing Cancel on Chrome's debugging
+    // banner; 'target_closed' is the tab or its renderer going away.
+    return message + ' (Chrome detached the debugger from tab ' + lastDetach.tabId + ': ' + lastDetach.reason + ')';
+  }
+  return message;
 }
 
 // ---------------------------------------------------------------- tabs ---
@@ -312,19 +317,49 @@ function describeConsoleArg(arg) {
 }
 
 /**
+ * Dialogs answered since they were last reported, and how the running command
+ * asked for them to be answered. The commands that can open one report these
+ * in their result; see DIALOG_COMMANDS.
+ */
+const dialogLog = [];
+let dialogChoice = null;
+
+/**
+ * Answer a JavaScript dialog the way the running command asked, or by default
+ * the way that loses nothing: an alert has only OK; a confirm, a prompt and a
+ * leave-page warning are dismissed, so a "Delete forever?" or an unsaved-changes
+ * warning is never agreed to unasked. The model learns of every dialog either way.
+ */
+function answerDialog(tabId, params) {
+  const type = String((params && params.type) || 'alert');
+  const asked = dialogChoice ? dialogChoice.dialog : undefined;
+  const accept = asked === 'accept' ? true : asked === 'dismiss' ? false : type === 'alert';
+  const reply = { accept: accept };
+  if (accept && type === 'prompt') {
+    reply.promptText = dialogChoice && typeof dialogChoice.promptText === 'string'
+      ? dialogChoice.promptText
+      : String((params && params.defaultPrompt) || '');
+  }
+  dialogLog.push({ tabId: tabId, type: type, message: String((params && params.message) || '').slice(0, 300), accepted: accept });
+  if (dialogLog.length > 50) dialogLog.splice(0, dialogLog.length - 50);
+  chrome.debugger.sendCommand({ tabId: tabId }, 'Page.handleJavaScriptDialog', reply)
+    .catch(() => { /* the page closed it first */ });
+}
+
+/**
  * Everything the debugger reports for a tab.
  *
  * A dialog owns the renderer's main thread, so leaving one up is
- * indistinguishable from a hung tab; console and network events are the
- * observation log the read_console / read_network commands serve back.
+ * indistinguishable from a hung tab, and it is answered at once; console and
+ * network events are the observation log the read_console / read_network
+ * commands serve back.
  */
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!source || typeof source.tabId !== 'number') return;
   const tabId = source.tabId;
 
   if (method === 'Page.javascriptDialogOpening') {
-    chrome.debugger.sendCommand({ tabId: tabId }, 'Page.handleJavaScriptDialog', { accept: true })
-      .catch(() => { /* the page closed it first */ });
+    answerDialog(tabId, params);
     return;
   }
 
@@ -374,12 +409,17 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 });
 
-chrome.debugger.onDetach.addListener(source => {
+/** Why Chrome last dropped an attachment, for an error that otherwise says only "Detached". */
+let lastDetach = null;
+
+chrome.debugger.onDetach.addListener((source, reason) => {
   if (source && typeof source.tabId === 'number') attached.delete(source.tabId);
+  lastDetach = { tabId: source && source.tabId, reason: String(reason), at: Date.now() };
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   attached.delete(tabId);
   cursorAt.delete(tabId);
+  resizedTabs.delete(tabId);
   consoleByTab.delete(tabId);
   networkByTab.delete(tabId);
   if (currentTabId === tabId) {
@@ -392,8 +432,29 @@ chrome.tabs.onRemoved.addListener(tabId => {
 /** Send one CDP command on a tab. */
 async function cdp(tabId, method, params) {
   await ensureAttached(tabId);
-  return chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
+  const started = Date.now();
+  try {
+    return await chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
+  } catch (error) {
+    // Chrome's own text ("Detached while handling command.") says neither which
+    // call failed nor after how long; one click makes eight calls.
+    const which = method + (params && typeof params.type === 'string' ? '(' + params.type + ')' : '');
+    const message = describe(error);
+    throw new Error(which + ' failed after ' + (Date.now() - started) + 'ms: ' + message
+      + (/URL of different extension/.test(message) ? FOREIGN_FRAME_NOTE : ''));
+  }
 }
+
+/**
+ * Chrome refuses every debugger command to a tab that contains a frame from a
+ * different extension, input and capture included. Measured with a login form:
+ * focusing its username field made the user's password manager inject its
+ * autofill menu, and the tab stayed locked until focus left the field. The
+ * frame sits in a closed shadow root and webNavigation does not list another
+ * extension's frames, so it cannot be named, only explained.
+ */
+const FOREIGN_FRAME_NOTE = ' — another extension (often a password manager\'s autofill menu) has put its own frame '
+  + 'into this page, and Chrome blocks the debugger from the whole tab while it is there';
 
 /**
  * Evaluate an expression in the page and return its JSON value. `userGesture`
@@ -1151,6 +1212,9 @@ function keyDescriptor(chord) {
 /** Where the cursor sits per tab, so a capture can put it back afterwards. */
 const cursorAt = new Map();
 
+/** The width each tab was resized to, so clearing knows what to wait for. */
+const resizedTabs = new Map();
+
 /** Paint the cursor at a point. A page that cannot take it is not an error. */
 async function paintCursor(tabId, x, y) {
   cursorAt.set(tabId, { x: x, y: y });
@@ -1210,20 +1274,37 @@ async function findAgentGroup() {
 }
 
 /** Put a freshly opened tab into the agent group, creating it on first use. */
+/**
+ * Run a tab-strip edit, waiting out Chrome's drag lock. While the user drags a
+ * tab every edit throws "Tabs cannot be edited right now (user may be dragging
+ * a tab)" — seen live, failing chrome_open while the user tidied their tabs —
+ * and the lock lifts when the drag ends.
+ */
+async function editTabs(edit) {
+  for (let waited = 0; ; waited += 100) {
+    try {
+      return await edit();
+    } catch (error) {
+      if (!/cannot be edited right now/i.test(describe(error)) || waited >= 5000) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+}
+
 async function groupTab(tabId) {
   try {
     const existing = await agentGroup();
     if (existing !== null) {
       try {
-        await chrome.tabs.group({ tabIds: [tabId], groupId: existing });
+        await editTabs(() => chrome.tabs.group({ tabIds: [tabId], groupId: existing }));
         return;
       } catch (error) {
         // The group vanished with its last tab; fall through and make a new one.
         agentGroupId = null;
       }
     }
-    agentGroupId = await chrome.tabs.group({ tabIds: [tabId] });
-    await chrome.tabGroups.update(agentGroupId, { title: GROUP_TITLE, color: GROUP_COLOR, collapsed: false });
+    agentGroupId = await editTabs(() => chrome.tabs.group({ tabIds: [tabId] }));
+    await editTabs(() => chrome.tabGroups.update(agentGroupId, { title: GROUP_TITLE, color: GROUP_COLOR, collapsed: false }));
   } catch (error) {
     // Grouping is presentation; a browser without it must still work.
   }
@@ -1448,6 +1529,16 @@ async function evaluateIn(tabId, contextId, expression) {
 /** The command table. Every method answers one JSON value. */
 const COMMANDS = {
 
+  /**
+   * Reload this extension from disk, so an edit to extension/ takes effect
+   * without a trip to chrome://extensions (test/reload-extension.mjs). Not a
+   * model tool. The reply goes out before the worker restarts.
+   */
+  async reloadExtension() {
+    setTimeout(() => chrome.runtime.reload(), 100);
+    return { reloading: chrome.runtime.getManifest().version };
+  },
+
   async tabs() {
     const tabs = await chrome.tabs.query({});
     const groupId = await agentGroup();
@@ -1459,16 +1550,16 @@ const COMMANDS = {
     if (!/^https?:\/\//i.test(url)) throw new Error('chrome_open needs an absolute http(s) url');
     let tabId;
     if (params.newTab === true) {
-      // Deliberately not activated. The tab still loads, and every read works
-      // on it without moving the user's view; input does bring it forward for
-      // the moment it acts. The user can watch it by opening the agent's tab
-      // group.
-      const created = await chrome.tabs.create({ url: url, active: false });
+      // Deliberately not activated. The tab still loads, and every command,
+      // input included, works on it without moving the user's view. The user
+      // can watch it by opening the agent's tab group.
+      const created = await editTabs(() => chrome.tabs.create({ url: url, active: false }));
       tabId = created.id;
       if (typeof tabId === 'number') await groupTab(tabId);
     } else {
       tabId = await resolveTabId(params.tabId);
-      await chrome.tabs.update(tabId, { url: url });
+      await guardLeaving(tabId, params, 'navigated');
+      await editTabs(() => chrome.tabs.update(tabId, { url: url }));
     }
     if (typeof tabId !== 'number') throw new Error('could not determine the target tab');
     rememberTab(tabId);
@@ -1804,9 +1895,24 @@ const COMMANDS = {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) {
       throw new Error('resize needs a non-negative width and height');
     }
+    // The override is applied at the tab's next frame, about a second away on a
+    // background tab: measured, a cleared 420px override still read 420 after
+    // ~1s of polling. Wait for the page to report the new width, so the next
+    // snapshot or click sees the layout this asked for.
+    const settled = async (done) => {
+      for (const started = Date.now(); Date.now() - started < 3000; ) {
+        if (done(Number(await evaluate(tabId, 'window.innerWidth')))) return true;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      return false;
+    };
+    const late = ' (the page had not laid out at the new size after 3s)';
     if (width === 0 || height === 0) {
+      const overridden = resizedTabs.get(tabId);
       await cdp(tabId, 'Emulation.clearDeviceMetricsOverride', {});
-      return { resized: 'cleared' };
+      resizedTabs.delete(tabId);
+      if (overridden === undefined || await settled(now => now !== overridden)) return { resized: 'cleared' };
+      return { resized: 'cleared' + late };
     }
     // Emulation rather than chrome.windows.update: it changes the layout the page
     // sees without moving the window the user is working in.
@@ -1816,7 +1922,9 @@ const COMMANDS = {
       deviceScaleFactor: typeof params.scale === 'number' ? params.scale : 0,
       mobile: params.mobile === true,
     });
-    return { resized: Math.round(width) + 'x' + Math.round(height) };
+    resizedTabs.set(tabId, Math.round(width));
+    const size = Math.round(width) + 'x' + Math.round(height);
+    return { resized: await settled(now => now === Math.round(width)) ? size : size + late };
   },
 
   async upload(params) {
@@ -1921,8 +2029,9 @@ const COMMANDS = {
     const tabId = typeof params.tabId === 'number' ? params.tabId : null;
     if (tabId === null) throw new Error('close needs a tabId');
     await assertTabAllowed(tabId);
+    await guardLeaving(tabId, params, 'closed');
     attached.delete(tabId);
-    await chrome.tabs.remove(tabId);
+    await editTabs(() => chrome.tabs.remove(tabId));
     return { closed: tabId };
   },
 
@@ -1942,11 +2051,107 @@ const COMMANDS = {
   },
 };
 
+/**
+ * Decide before leaving a page that asks first, so Chrome never shows its
+ * leave-page warning.
+ *
+ * Measured in test/probe-beforeunload.mjs: navigating a background tab whose
+ * page has a beforeunload handler made Chrome activate that tab to show the
+ * warning — moving the user's view — whether the navigation came from
+ * chrome.tabs.update or Page.navigate, and a dismissed warning left
+ * chrome_open waiting out its 20s load timeout. Both handler styles
+ * (addEventListener and the onbeforeunload property) show up in
+ * DOMDebugger.getEventListeners, so the page can be checked first: refused
+ * unless the model passed dialog: "accept", and with it the handlers are taken
+ * off before the page is left.
+ *
+ * A page this cannot inspect (a chrome:// page, a tab another extension's frame
+ * locks) is left as before.
+ */
+async function guardLeaving(tabId, params, action) {
+  // The handler functions only come back as objects when an objectGroup is named.
+  const group = 'dsh-leave-guard';
+  const find = async () => {
+    const win = await cdp(tabId, 'Runtime.evaluate', { expression: 'window', objectGroup: group });
+    const windowId = win && win.result ? win.result.objectId : null;
+    if (!windowId) return { windowId: null, listeners: [] };
+    const listed = await cdp(tabId, 'DOMDebugger.getEventListeners', { objectId: windowId });
+    return { windowId, listeners: (listed && listed.listeners ? listed.listeners : []).filter(l => l.type === 'beforeunload') };
+  };
+  let found;
+  try {
+    found = await find();
+  } catch (error) {
+    return;
+  }
+  try {
+    if (found.listeners.length === 0) return;
+    if (params.dialog !== 'accept') {
+      throw new Error('the page in tab ' + tabId + ' asks before it is left (it may have unsaved changes), so it was not '
+        + action + ' — repeat with dialog: "accept" to leave it anyway');
+    }
+    await cdp(tabId, 'Runtime.evaluate', { expression: 'window.onbeforeunload = null' });
+    for (const listener of found.listeners) {
+      if (!listener.handler || !listener.handler.objectId) continue;
+      await cdp(tabId, 'Runtime.callFunctionOn', {
+        objectId: found.windowId,
+        functionDeclaration: 'function (handler, capture) { this.removeEventListener("beforeunload", handler, capture); }',
+        arguments: [{ objectId: listener.handler.objectId }, { value: listener.useCapture === true }],
+      });
+    }
+    // A handler that survived would show the warning anyway and pull the tab forward.
+    const left = await find();
+    if (left.listeners.length > 0) {
+      throw new Error('could not switch off the leave-page warning of the page in tab ' + tabId + ', so it was not '
+        + action + ' — Chrome would bring the tab forward to show it');
+    }
+  } finally {
+    await cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup: group }).catch(() => { /* the page is going */ });
+  }
+}
+
+/**
+ * Give the user back the tab they were on, if a dialog made Chrome bring an
+ * agent tab forward. Only the window of a tab that had a dialog during this
+ * command is touched, and only when that tab took the view — or, when it has
+ * since closed, when Chrome moved the view to whatever sat next to it — so a
+ * switch the user made elsewhere is never undone.
+ */
+async function restoreViewAfterDialogs(dialogs, tabsBefore) {
+  for (const tabId of new Set(dialogs.map(d => d.tabId))) {
+    const known = tabsBefore.find(t => t.id === tabId);
+    if (!known) continue;
+    const previous = tabsBefore.find(t => t.active && t.windowId === known.windowId);
+    if (!previous || previous.id === tabId) continue;
+    const [now] = await chrome.tabs.query({ active: true, windowId: known.windowId });
+    if (!now || now.id === previous.id) continue;
+    const dialogTabGone = (await chrome.tabs.get(tabId).catch(() => null)) === null;
+    if (now.id !== tabId && !dialogTabGone) continue;
+    await editTabs(() => chrome.tabs.update(previous.id, { active: true })).catch(() => { /* that tab went away */ });
+  }
+}
+
+/** The commands whose result carries the dialogs answered meanwhile. */
+const DIALOG_COMMANDS = new Set(['click', 'key', 'type', 'eval', 'open', 'close']);
+
 /** Dispatch one command by name. */
 async function runCommand(method, params) {
   const handler = COMMANDS[method];
   if (typeof handler !== 'function') throw new Error('unknown command: ' + String(method));
-  return handler(params);
+  if (!DIALOG_COMMANDS.has(method)) return handler(params);
+  dialogChoice = { dialog: params.dialog, promptText: params.promptText };
+  const tabsBefore = await chrome.tabs.query({});
+  try {
+    const value = await handler(params);
+    // Everything answered since the last report, including a dialog a timer
+    // opened during some other command: the model must hear of each one once.
+    const dialogs = dialogLog.splice(0);
+    if (dialogs.length > 0 && value && typeof value === 'object' && !Array.isArray(value)) value.dialogs = dialogs;
+    await restoreViewAfterDialogs(dialogs, tabsBefore);
+    return value;
+  } finally {
+    dialogChoice = null;
+  }
 }
 
 // -------------------------------------------------------- lifecycle ---

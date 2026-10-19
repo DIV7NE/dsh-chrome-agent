@@ -53,13 +53,24 @@ wss.on('connection', ws => {
   });
 });
 
+/** The most recent command, so a harness failure says which call threw. */
+let lastCall = null;
+
+/** Every tab this run opened, closed at the end even when the run aborts. */
+const openedTabs = new Set();
+
 function call(method, params, timeoutMs) {
   if (!socket) return Promise.reject(new Error('no extension connected'));
+  lastCall = { method, params };
   const id = ++nextId;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { waiting.delete(id); reject(new Error(method + ' timed out')); }, timeoutMs || 25000);
     waiting.set(id, {
-      resolve: v => { clearTimeout(timer); resolve(v); },
+      resolve: v => {
+        clearTimeout(timer);
+        if (method === 'open' && v && typeof v.tabId === 'number') openedTabs.add(v.tabId);
+        resolve(v);
+      },
       reject: e => { clearTimeout(timer); reject(e); },
     });
     socket.send(JSON.stringify({ t: 'command', id, method, params: params || {} }));
@@ -418,12 +429,14 @@ try {
     framedFind.matches.some(m => /^\[f\d+\]/.test(m)), framedFind.matches);
 
   // The agent's tab is in the background here; focus emulation must let a real
-  // wheel through rather than leave it to the scripted fallback.
+  // wheel through. Measured on this fixture: the wheel acked after ~1s and the
+  // page moved ~1s after that (1992ms in all), and 3049-3078ms when the ack
+  // was slower, so the bound is for a hang, not for the cost of each frame.
   const bgStart = Date.now();
   const bg = await call('scroll', { deltaY: 400, tabId: cap.tabId }, 12000);
   const bgElapsed = Date.now() - bgStart;
   check('a background-tab scroll is a real wheel', /^wheel/.test(String(bg.scrolled)), bg);
-  check('a background-tab scroll does not hang', bgElapsed < 3000, { bgElapsed });
+  check('a background-tab scroll does not hang', bgElapsed < 5000, { bgElapsed });
 
   await call('hover', { selector: '#b', tabId: cap.tabId });
   const afterHover = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
@@ -531,10 +544,12 @@ try {
   check('no refused click landed anywhere, not even at 0,0', strayClicks.length === 0, strayClicks);
 
   // --- typing: a real click into the field, then the field read back --------
-  const typeHtml = '<input id="t1" style="position:absolute;left:20px;top:520px">'
-    + '<input id="t3" maxlength="3" style="position:absolute;left:220px;top:520px">'
-    + '<input id="tpw" type="password" style="position:absolute;left:420px;top:520px">'
-    + '<input id="tcov" style="position:absolute;left:20px;top:580px">'
+  // A password manager that injects its autofill frame into the page locks the debugger out of the
+  // whole tab, so these fields opt out; that interaction gets its own section.
+  const typeHtml = '<input data-bwignore data-1p-ignore data-lpignore autocomplete="off" id="t1" style="position:absolute;left:20px;top:520px">'
+    + '<input data-bwignore data-1p-ignore data-lpignore autocomplete="off" id="t3" maxlength="3" style="position:absolute;left:220px;top:520px">'
+    + '<input data-bwignore data-1p-ignore data-lpignore autocomplete="off" id="tpw" type="password" style="position:absolute;left:420px;top:520px">'
+    + '<input data-bwignore data-1p-ignore data-lpignore autocomplete="off" id="tcov" style="position:absolute;left:20px;top:580px">'
     + '<div id="tcovered" style="position:absolute;left:10px;top:570px;width:220px;height:40px;background:red"></div>'
     + '<div id="tce" contenteditable="true" style="position:absolute;left:220px;top:580px;width:200px">hello</div>';
   await call('eval', { tabId: acc.tabId, expression: '(function () { document.body.insertAdjacentHTML("beforeend", ' + JSON.stringify(typeHtml) + '); document.getElementById("t1").value = "old"; return "ok"; })()' });
@@ -551,7 +566,65 @@ try {
   check('the refused text went nowhere', JSON.parse(tcovValue.result) === '', tcovValue);
   const tce = await call('type', { selector: '#tce', text: ' world', tabId: acc.tabId });
   check('a contenteditable is appended to, not wiped', tce.value === 'hello world', tce);
+
+  // --- dialogs: reported every time, and nothing agreed to unasked ----------
+  const dialogHtml = '<button id="dconfirm" style="position:absolute;left:20px;top:660px" onclick="window.__confirm = confirm(\'Delete forever?\')">confirm</button>'
+    + '<button id="dalert" style="position:absolute;left:120px;top:660px" onclick="alert(\'Saved\')">alert</button>'
+    + '<button id="dprompt" style="position:absolute;left:220px;top:660px" onclick="window.__prompt = prompt(\'Name?\', \'default\')">prompt</button>';
+  await call('eval', { tabId: acc.tabId, expression: '(function () { document.body.insertAdjacentHTML("beforeend", ' + JSON.stringify(dialogHtml) + '); return "ok"; })()' });
+  const confirmDefault = await call('click', { selector: '#dconfirm', tabId: acc.tabId });
+  const confirmAnswer = await call('eval', { tabId: acc.tabId, expression: 'window.__confirm' });
+  check('a confirm is dismissed by default', JSON.parse(confirmAnswer.result) === false, confirmAnswer);
+  check('the dismissed confirm is reported with its message',
+    Array.isArray(confirmDefault.dialogs) && confirmDefault.dialogs.length === 1 && confirmDefault.dialogs[0].type === 'confirm'
+    && confirmDefault.dialogs[0].message === 'Delete forever?' && confirmDefault.dialogs[0].accepted === false, confirmDefault);
+  const confirmAccepted = await call('click', { selector: '#dconfirm', dialog: 'accept', tabId: acc.tabId });
+  const confirmYes = await call('eval', { tabId: acc.tabId, expression: 'window.__confirm' });
+  check('dialog: "accept" answers a confirm OK', JSON.parse(confirmYes.result) === true && confirmAccepted.dialogs[0].accepted === true, confirmAccepted);
+  const alerted = await call('click', { selector: '#dalert', tabId: acc.tabId });
+  check('an alert is accepted and reported', Array.isArray(alerted.dialogs) && alerted.dialogs[0].type === 'alert' && alerted.dialogs[0].accepted === true, alerted);
+  await call('click', { selector: '#dprompt', dialog: 'accept', promptText: 'deepseek', tabId: acc.tabId });
+  const prompted = await call('eval', { tabId: acc.tabId, expression: 'window.__prompt' });
+  check('a prompt is answered with promptText', JSON.parse(prompted.result) === 'deepseek', prompted);
+  const quiet = await call('click', { selector: '#t1', tabId: acc.tabId });
+  check('an action that opens no dialog reports none', quiet.dialogs === undefined, quiet);
   await call('close', { tabId: acc.tabId });
+
+  // A page that asks before it is left. Chrome brings a background tab forward
+  // to show that warning, so the extension decides first and Chrome never shows it.
+  const activeNow = async () => JSON.stringify((await call('tabs')).filter(t => t.active).map(t => t.id).sort());
+  const armLeave = async tabId => {
+    await call('eval', { tabId, expression: '(function () { window.addEventListener("beforeunload", function (e) { e.preventDefault(); e.returnValue = ""; }); document.body.insertAdjacentHTML("beforeend", "<a id=\\"away\\" href=\\"https://example.com/?clicked-away\\" style=\\"position:absolute;left:20px;top:300px\\">away</a>"); return "ok"; })()' });
+    await call('click', { x: 10, y: 10, tabId });
+  };
+  const leave = await call('open', { url: 'https://example.com/?leave', newTab: true });
+  await armLeave(leave.tabId);
+  const viewBefore = await activeNow();
+  const stayStart = Date.now();
+  let stayError = null;
+  try { await call('open', { url: 'https://example.com/?left', tabId: leave.tabId }); } catch (error) { stayError = String(error.message); }
+  const stayMs = Date.now() - stayStart;
+  const stillThere = await call('eval', { tabId: leave.tabId, expression: 'location.search' });
+  check('navigating away from a page that asks first is refused by default', stayError !== null && /asks before it is left/.test(stayError), stayError);
+  check('the refused navigation kept the page', JSON.parse(stillThere.result) === '?leave', stillThere);
+  check('the refusal is immediate, not a load timeout', stayMs < 3000, { stayMs });
+  check('the refusal did not move the user\'s view', await activeNow() === viewBefore, { before: viewBefore, after: await activeNow() });
+  let closeError = null;
+  try { await call('close', { tabId: leave.tabId }); } catch (error) { closeError = String(error.message); }
+  check('closing a page that asks first is refused by default', closeError !== null && /asks before it is left/.test(closeError), closeError);
+  const left = await call('open', { url: 'https://example.com/?left', tabId: leave.tabId, dialog: 'accept' });
+  check('dialog: "accept" leaves the page', /\?left/.test(String(left.url)), left);
+  check('leaving with accept showed no warning and did not move the view', left.dialogs === undefined && await activeNow() === viewBefore, { left, after: await activeNow() });
+  // A link click can trigger the warning too; it is dismissed, and the view is given back.
+  await armLeave(leave.tabId);
+  const linkClick = await call('click', { selector: '#away', tabId: leave.tabId });
+  await new Promise(r => setTimeout(r, 500));
+  const afterLink = await call('eval', { tabId: leave.tabId, expression: 'location.search' });
+  check('a link click on a page that asks first is held by the dismissed warning', JSON.parse(afterLink.result) === '?left'
+    && Array.isArray(linkClick.dialogs) && linkClick.dialogs[0].type === 'beforeunload', { linkClick, afterLink });
+  check('the warning a click raised did not keep the user\'s view', await activeNow() === viewBefore, { before: viewBefore, after: await activeNow() });
+  const closedLeave = await call('close', { tabId: leave.tabId, dialog: 'accept' });
+  check('closing it with accept showed no warning and did not move the view', closedLeave.dialogs === undefined && await activeNow() === viewBefore, { closedLeave, after: await activeNow() });
 
   const stillActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();
   check('the user\'s active tabs never changed', JSON.stringify(stillActive) === JSON.stringify(userActive), { before: userActive, after: stillActive });
@@ -570,8 +643,18 @@ try {
   check('closed tabs are gone', after.filter(t => /example\.com/.test(t.url)).length === 0, after.map(t => t.url).slice(0, 5));
 } catch (error) {
   console.log('  FAIL  harness :: ' + String((error && error.message) || error));
+  console.log('        last call: ' + JSON.stringify(lastCall).slice(0, 300));
   failures.push('harness');
 }
+
+// Hygiene: an aborted run used to leave every tab it had opened behind.
+const stillOpen = new Set(socket ? (await call('tabs').catch(() => [])).map(t => t.id) : []);
+let leftovers = 0;
+for (const tabId of openedTabs) {
+  if (!stillOpen.has(tabId)) continue;
+  try { await call('close', { tabId, dialog: 'accept' }, 5000); leftovers += 1; } catch (error) { /* already gone */ }
+}
+if (leftovers > 0) console.log('closed ' + leftovers + ' tab(s) this run left open');
 
 wss.close();
 console.log('');

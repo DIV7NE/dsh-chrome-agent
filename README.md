@@ -226,8 +226,27 @@ extension is what dials out, so that is where the address belongs.
 - **Text entry uses `Input.insertText`.** Fine for forms and search boxes; a page
   that needs per-keystroke events (some typeaheads) may need a follow-up.
 - **The screenshot is the visible viewport**, not a full-page capture.
-- **An `alert()` is dismissed automatically.** A dialog owns the renderer's main
-  thread, so leaving one open is indistinguishable from a hung tab.
+- **Dialogs are answered at once, and reported.** A dialog owns the renderer's
+  main thread, so leaving one open is indistinguishable from a hung tab. An alert
+  is accepted; a confirm or prompt is dismissed unless the action passed
+  `dialog: "accept"` (and `promptText`). Every dialog comes back in the result of
+  the click, key, type, eval, open or close that raised it.
+- **A page that asks before it is left is never left unasked.** Chrome brings a
+  background tab forward to show its leave-page warning, so `chrome_open` and
+  `chrome_close` check for a `beforeunload` handler first and refuse unless given
+  `dialog: "accept"`, in which case the handler is removed and the page is left
+  without the warning appearing. If a click raises the warning anyway, it is
+  dismissed and your previous tab is put back in front.
+- **A password manager's autofill menu locks the agent out of that tab.** When the
+  agent focuses a login-style field, a password manager such as Bitwarden injects
+  its own frame into the page, and Chrome then refuses every debugger command to
+  the whole tab — input, capture and reads alike — until focus leaves the field.
+  The error says so. To avoid it, set the password manager's site access to "On
+  click" in `chrome://extensions`, or turn off its inline autofill menu.
+- **Background tabs answer at about a frame per second.** Anything that waits for
+  a fresh frame — a wheel scroll, a screenshot, a click that opens a dialog —
+  takes around one to two seconds on a background tab, against milliseconds on a
+  visible one. That is the price of never taking your view.
 - **Unpacked only.** Chrome will not install an unpublished `.crx`, so this loads
   in Developer mode. `--load-extension` no longer works either: Chrome 153 ignores
   it, which is why the extension is loaded by hand.
@@ -239,4 +258,6 @@ npm run build          # esbuild: lib/index.js only; the extension needs no buil
 npm run typecheck      # tsc --noEmit
 npm test               # hermetic: id derivation + the Origin fence
 node test/live-extension.mjs [port]   # drives a real Chrome (see its header)
+node test/reload-extension.mjs [port] # reload the unpacked extension after editing it
+node test/cleanup-agent-tabs.mjs [port] # close test tabs an aborted run left behind
 ```
