@@ -105,6 +105,19 @@ frame text is usually widget and banner noise. At most **12 frames** are read; a
 snapshot or a find reports how many further frames it did not read, and which
 frames it could not read at all.
 
+### Clicks check their target first
+
+`chrome_click`, `chrome_hover` and `chrome_drag` hit-test the target before any
+mouse event goes out. The element must still be on the page and have a size, and
+`elementFromPoint` (looking through open shadow roots, and again in the top page
+for a frame ref) must land on the element or inside it. The first point tried is
+the centre of the element's first line box, so a wrapped link is not clicked in
+the gap between its lines; if that point is covered, a grid of other points on the
+element is tried. When nothing on the element is reachable, the command is refused
+and the error names what covers it. Before this, a covered button clicked the
+cover, and a ref whose element had re-rendered or been hidden clicked the page's
+top-left corner — all reported as success.
+
 ## It works in the background
 
 Every tab the agent opens lands in a **tab group called "DSH Chrome Agent"**, and

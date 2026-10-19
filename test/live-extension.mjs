@@ -477,12 +477,66 @@ try {
   const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
 
+  // --- click accuracy: every case here clicked the wrong thing, or clicked at
+  // (0,0), and still reported success before the pre-click hit test ---------
+  console.log('');
+  console.log('click accuracy');
+  const acc = await call('open', { url: 'https://example.com', newTab: true });
+  const accHtml = '<style>body{margin:0}</style>'
+    + '<button id="half" style="position:absolute;left:20px;top:20px;width:200px;height:40px">half covered</button>'
+    // Covers the left 130 of 200px, so the button's centre (x=120) is under it.
+    + '<div id="halfcover" style="position:absolute;left:20px;top:20px;width:130px;height:40px;background:red"></div>'
+    + '<button id="full" style="position:absolute;left:20px;top:100px;width:200px;height:40px">fully covered</button>'
+    + '<div id="fullcover" style="position:absolute;left:10px;top:90px;width:220px;height:60px;background:red">cookie banner</div>'
+    + '<div style="position:absolute;left:20px;top:180px;width:120px;font:16px/40px sans-serif">xx <a id="wrap" href="#w">wrapped link text here</a></div>'
+    + '<button id="stale" style="position:absolute;left:20px;top:300px">stale</button>'
+    + '<button id="hide" style="position:absolute;left:120px;top:300px">hide</button>'
+    + '<iframe id="cf" style="position:absolute;left:20px;top:360px;width:300px;height:100px;border:0" srcdoc="<button id=&quot;fb&quot; style=&quot;width:200px;height:50px&quot;>framed</button>"></iframe>'
+    + '<div id="framecover" style="position:absolute;left:10px;top:350px;width:320px;height:120px;background:rgba(0,0,0,0.5)"></div>';
+  await call('eval', { tabId: acc.tabId, expression: '(function () { document.body.innerHTML = ' + JSON.stringify(accHtml) + '; window.__clicks = []; document.addEventListener("click", function (e) { window.__clicks.push(e.target.id || e.target.tagName); }, true); return "ok"; })()' });
+  await new Promise(r => setTimeout(r, 600));
+  const clicksOf = async () => JSON.parse((await call('eval', { tabId: acc.tabId, expression: 'window.__clicks.splice(0)' })).result);
+  const refusal = async params => {
+    try { await call('click', { ...params, tabId: acc.tabId }); return null; } catch (error) { return String(error.message); }
+  };
+
+  await call('click', { selector: '#half', tabId: acc.tabId });
+  const halfClicks = await clicksOf();
+  check('a half-covered button is clicked on its visible half', JSON.stringify(halfClicks) === '["half"]', halfClicks);
+
+  const fullError = await refusal({ selector: '#full' });
+  const fullClicks = await clicksOf();
+  check('a fully covered button is refused, naming what covers it', fullError !== null && /covered by div#fullcover/.test(fullError), fullError);
+  check('the refused click landed nowhere', fullClicks.length === 0, fullClicks);
+
+  await call('click', { selector: '#wrap', tabId: acc.tabId });
+  const wrapClicks = await clicksOf();
+  check('a wrapped link is clicked on its text, not between its lines', JSON.stringify(wrapClicks) === '["wrap"]', wrapClicks);
+
+  const accSnap = await call('snapshot', { tabId: acc.tabId });
+  const staleRef = /\[ref=(\d+)\] button "stale"/.exec(accSnap.snapshot);
+  const hideRef = /\[ref=(\d+)\] button "hide"/.exec(accSnap.snapshot);
+  const frameRef = /\[ref=(\d+) frame=(f\d+)\] button "framed"/.exec(accSnap.snapshot);
+  check('the accuracy fixture is in the snapshot', staleRef !== null && hideRef !== null && frameRef !== null, accSnap.snapshot.slice(0, 600));
+  await call('eval', { tabId: acc.tabId, expression: '(function () { var old = document.getElementById("stale"); var fresh = old.cloneNode(true); old.replaceWith(fresh); document.getElementById("hide").style.display = "none"; return "ok"; })()' });
+  const staleError = staleRef ? await refusal({ ref: Number(staleRef[1]) }) : 'no ref';
+  check('a ref whose element re-rendered is refused', staleError !== null && /no longer on the page/.test(staleError), staleError);
+  const hideError = hideRef ? await refusal({ ref: Number(hideRef[1]) }) : 'no ref';
+  check('a ref whose element was hidden is refused', hideError !== null && /no visible size/.test(hideError), hideError);
+  const frameError = frameRef ? await refusal({ ref: Number(frameRef[1]), frame: frameRef[2] }) : 'no ref';
+  check('a frame ref under an overlay is refused', frameError !== null && /covered by div#framecover/.test(frameError), frameError);
+  const strayClicks = await clicksOf();
+  check('no refused click landed anywhere, not even at 0,0', strayClicks.length === 0, strayClicks);
+  await call('close', { tabId: acc.tabId });
+
   const stillActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();
   check('the user\'s active tabs never changed', JSON.stringify(stillActive) === JSON.stringify(userActive), { before: userActive, after: stillActive });
 
   // Close every test tab, including litter from earlier runs.
   const everything = await call('tabs');
-  const litter = everything.filter(t => /^https?:\/\/(www\.)?(example\.com|duckduckgo\.com)/.test(t.url));
+  // The snapshot click follows example.com's "Learn more" link to iana.org.
+  const litter = everything.filter(t => t.agent === true
+    && /^https?:\/\/(www\.)?(example\.com|duckduckgo\.com|iana\.org)/.test(t.url));
   let closed = 0;
   for (const tab of litter) {
     try { await call('close', { tabId: tab.id }); closed += 1; } catch (error) { /* already gone */ }

@@ -449,7 +449,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_click',
     description:
       'Click an element. Prefer `ref` from the latest chrome_snapshot. Use `selector` for a CSS selector, '
-      + 'or `x`/`y` for raw viewport coordinates. Dispatches trusted input events at the element\'s centre. '
+      + 'or `x`/`y` for raw viewport coordinates. Dispatches trusted mouse events on a visible point of the element: '
+      + 'before clicking it checks that the element is still on the page, has a size, and is what a click there would hit. '
+      + 'If a banner or overlay covers it everywhere, the click is refused and the error names the cover — dismiss it, then retry. '
+      + 'Always click by ref rather than calling .click() through chrome_eval: a scripted click is not a real one and skips this check. '
       + 'Works on a background tab without moving the user\'s view.',
     parameters: {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot (e.g. 7).' },

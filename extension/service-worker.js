@@ -609,23 +609,98 @@ function pointExpressionFor(params, prefix) {
   const fixedY = typeof params[prefix === '' ? 'y' : prefix + 'Y'] === 'number'
     ? params[prefix === '' ? 'y' : prefix + 'Y']
     : null;
-  if (fixedX !== null && fixedY !== null) {
-    return '(function () { return { x: ' + Math.round(fixedX) + ', y: ' + Math.round(fixedY)
-      + ', label: "coordinates ' + Math.round(fixedX) + ',' + Math.round(fixedY) + '" }; })()';
-  }
   void cap;
+  if (fixedX !== null && fixedY !== null) {
+    const x = Math.round(fixedX);
+    const y = Math.round(fixedY);
+    return [
+      '(function () {',
+      HIT_TEST_HELPERS,
+      '  var at = topAt(' + x + ', ' + y + ');',
+      '  return { x: ' + x + ', y: ' + y + ', label: "coordinates ' + x + ',' + y + '" + (at ? " on " + describe(at) : "") };',
+      '})()',
+    ].join('\n');
+  }
   return [
     '(function () {',
+    HIT_TEST_HELPERS,
     '  var el = null;',
     ref !== null ? '  el = (window.__dshChromeRefs || [])[' + String(ref - 1) + '];' : '  el = null;',
     selector !== null ? '  if (!el) el = document.querySelector(' + JSON.stringify(selector) + ');' : '',
     '  if (!el) return null;',
+    '  var label = (el.getAttribute("aria-label") || el.innerText || el.value || el.tagName).replace(/\\s+/g, " ").trim().slice(0, 80);',
+    '  if (!el.isConnected) return { error: "gone", label: label };',
     '  el.scrollIntoView({ block: "center", inline: "center" });',
-    '  var r = el.getBoundingClientRect();',
-    '  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),',
-    '           label: (el.getAttribute("aria-label") || el.innerText || el.tagName).slice(0, 80) };',
+    '  var rects = el.getClientRects();',
+    '  var boxes = [];',
+    '  for (var i = 0; i < rects.length; i++) if (rects[i].width >= 1 && rects[i].height >= 1) boxes.push(rects[i]);',
+    '  if (boxes.length === 0) return { error: "hidden", label: label };',
+    // The first line box's centre first: a wrapped link's bounding-box centre can
+    // fall in the gap between its lines. Then a grid over every box, for when the
+    // centre is covered.
+    '  var points = [];',
+    '  for (var b = 0; b < boxes.length; b++) {',
+    '    var r = boxes[b];',
+    '    points.push([r.left + r.width / 2, r.top + r.height / 2]);',
+    '    var fx = [0.25, 0.5, 0.75], fy = [0.25, 0.5, 0.75];',
+    '    for (var p = 0; p < 3; p++) for (var q = 0; q < 3; q++) points.push([r.left + r.width * fx[p], r.top + r.height * fy[q]]);',
+    '  }',
+    '  var blocker = null, inView = false;',
+    '  for (var k = 0; k < points.length; k++) {',
+    '    var x = Math.round(points[k][0]), y = Math.round(points[k][1]);',
+    '    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;',
+    '    inView = true;',
+    '    var hit = topAt(x, y);',
+    '    if (hit && within(hit, el)) return { x: x, y: y, label: label };',
+    '    if (!blocker && hit) blocker = hit;',
+    '  }',
+    '  if (!inView) return { error: "offscreen", label: label };',
+    '  return { error: "covered", label: label, blocker: blocker ? describe(blocker) : "something" };',
     '})()',
   ].join('\n');
+}
+
+/**
+ * Page-side helpers for the pre-click hit test, inlined into each resolver.
+ * `topAt` is what a click at (x, y) would land on, looking through open shadow
+ * roots; `within` asks whether that is the target or inside it.
+ */
+const HIT_TEST_HELPERS = [
+  '  function topAt(x, y) {',
+  '    var hit = document.elementFromPoint(x, y);',
+  '    while (hit && hit.shadowRoot) {',
+  '      var inner = hit.shadowRoot.elementFromPoint(x, y);',
+  '      if (!inner || inner === hit) break;',
+  '      hit = inner;',
+  '    }',
+  '    return hit;',
+  '  }',
+  '  function within(hit, el) {',
+  '    for (var n = hit; n; n = n.parentNode || n.host) if (n === el) return true;',
+  '    return false;',
+  '  }',
+  '  function describe(node) {',
+  '    var name = node.tagName.toLowerCase() + (node.id ? "#" + node.id : "")',
+  '      + (typeof node.className === "string" && node.className.trim() ? "." + node.className.trim().split(/\\s+/)[0] : "");',
+  '    var text = String(node.innerText || node.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().slice(0, 40);',
+  '    return name + (text ? " \\"" + text + "\\"" : "");',
+  '  }',
+].join('\n');
+
+/** Turn a resolver's refusal into the error the model sees. */
+function pointRefusal(point) {
+  const what = point.label ? JSON.stringify(point.label) : 'the target';
+  if (point.error === 'gone') {
+    return what + ' is no longer on the page (it re-rendered) — take a fresh chrome_snapshot and use its new ref';
+  }
+  if (point.error === 'hidden') {
+    return what + ' has no visible size, so there is nothing to act on — it may be collapsed or hidden; take a fresh chrome_snapshot';
+  }
+  if (point.error === 'offscreen') {
+    return what + ' could not be brought into the viewport, so input there would be dropped — scroll to it first';
+  }
+  return what + ' is covered by ' + point.blocker + ' at every visible point, so input would land on that instead — '
+    + 'dismiss or scroll past it first';
 }
 
 /**
@@ -788,6 +863,7 @@ async function resolvePoint(tabId, params, prefix) {
   // coordinates, so only a child frame has a parent-tree offset to walk.
   const point = await evaluateInFrame(tabId, frameKey, pointExpressionFor(params, prefix));
   if (!point) return null;
+  if (point.error) throw new Error(pointRefusal(point));
   if (frameKey === '') return point;
   const found = await frameFor(tabId, frameKey);
   const offset = await frameOffsetFor(tabId, found.frames, frameKey);
@@ -800,6 +876,17 @@ async function resolvePoint(tabId, params, prefix) {
     throw new Error('cannot read the page scroll, so frame ' + frameKey + ' cannot be placed — '
       + 'pass x and y explicitly instead');
   }
+  // The frame's own hit test cannot see the page above it, such as an overlay
+  // drawn over the iframe, so the point is checked again in the top document.
+  const top = await evaluate(tabId, [
+    '(function () {',
+    HIT_TEST_HELPERS,
+    '  var hit = topAt(' + Math.round(placed.x) + ', ' + Math.round(placed.y) + ');',
+    '  if (hit && (hit.tagName === "IFRAME" || hit.tagName === "FRAME")) return "frame";',
+    '  return hit ? describe(hit) : "nothing";',
+    '})()',
+  ].join('\n'));
+  if (top !== 'frame') throw new Error(pointRefusal({ error: 'covered', label: point.label, blocker: top }));
   return { x: placed.x, y: placed.y, label: point.label };
 }
 
