@@ -16,7 +16,11 @@
     "tabs",
     "tabGroups",
     "storage",
-    "alarms"
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "options_page": "options.html",
   "icons": {

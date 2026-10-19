@@ -569,13 +569,15 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
           submitted: { type: 'boolean', required: true },
           value: { type: 'string', required: true, description: 'What the field holds after typing (a password shows only its length).' },
           matches: { type: 'boolean', required: true, description: 'Whether the field contains what was typed.' },
+          note: { type: 'string', description: 'How the text went in, when it was not by keystrokes.' },
           dialogs: DIALOGS_OUTPUT,
         },
       },
-      render: textRender<{ typed: boolean; submitted: boolean; value: string; matches: boolean; dialogs?: DialogReport[] }>(v =>
+      render: textRender<{ typed: boolean; submitted: boolean; value: string; matches: boolean; note?: string; dialogs?: DialogReport[] }>(v =>
         (v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.')
         + ' The field now reads: ' + JSON.stringify(v.value) + '.'
         + (v.matches ? '' : ' WARNING: that is not what was typed — the page reformatted, truncated or rejected it.')
+        + (v.note ? ' Note: ' + v.note + '.' : '')
         + dialogNote(v),
       ),
     },

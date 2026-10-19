@@ -430,19 +430,84 @@ chrome.tabs.onRemoved.addListener(tabId => {
 });
 
 /** Send one CDP command on a tab. */
-async function cdp(tabId, method, params) {
-  await ensureAttached(tabId);
+async function cdpOnce(tabId, method, params) {
   const started = Date.now();
   try {
+    await ensureAttached(tabId);
     return await chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
   } catch (error) {
     // Chrome's own text ("Detached while handling command.") says neither which
     // call failed nor after how long; one click makes eight calls.
     const which = method + (params && typeof params.type === 'string' ? '(' + params.type + ')' : '');
-    const message = describe(error);
-    throw new Error(which + ' failed after ' + (Date.now() - started) + 'ms: ' + message
-      + (/URL of different extension/.test(message) ? FOREIGN_FRAME_NOTE : ''));
+    const failure = new Error(which + ' failed after ' + (Date.now() - started) + 'ms: ' + describe(error));
+    failure.refusedForForeignFrame = /URL of different extension/.test(describe(error));
+    failure.interrupted = /Detached while handling command/.test(describe(error));
+    throw failure;
   }
+}
+
+/**
+ * One CDP call, recovering a tab another extension's frame has locked.
+ *
+ * Chrome refuses a command to such a tab before running it, so after the frame
+ * is released the same command is sent once more. "Detached while handling
+ * command" is how the lock often begins, but by then the command may already
+ * have run, so it is released and reported, never repeated here.
+ */
+async function cdp(tabId, method, params) {
+  try {
+    return await cdpOnce(tabId, method, params);
+  } catch (error) {
+    if (!error.refusedForForeignFrame && !error.interrupted) throw error;
+    const released = await releaseForeignFrame(tabId);
+    if (!released) throw new Error(error.message + FOREIGN_FRAME_NOTE + ', and it could not be cleared');
+    if (error.interrupted) {
+      throw new Error(error.message + FOREIGN_FRAME_NOTE + '; it has been cleared, so repeat the action');
+    }
+    return cdpOnce(tabId, method, params);
+  }
+}
+
+/** When each tab was last released from another extension's frame. */
+const releasedAt = new Map();
+
+/**
+ * Take focus off whatever field brought another extension's frame into a tab,
+ * then wait until the debugger can use the tab again.
+ *
+ * Measured with Bitwarden (test/probe-foreign-frame.mjs): its autofill menu is
+ * injected while a login-style field has focus, sits in a closed shadow root,
+ * and locks every debugger command out of the tab — Escape and clicks included.
+ * chrome.scripting is not locked, and blurring the field through it made the
+ * menu go away and a fresh attach work again.
+ */
+async function releaseForeignFrame(tabId) {
+  const blur = () => {
+    const active = document.activeElement;
+    if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+  };
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tabId, allFrames: true }, func: blur });
+  } catch (error) {
+    // A frame the extension cannot script must not stop the blur where it can.
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, func: blur });
+    } catch (mainError) {
+      return false;
+    }
+  }
+  for (const started = Date.now(); Date.now() - started < 3000; ) {
+    try {
+      await ensureAttached(tabId);
+      await chrome.debugger.sendCommand({ tabId: tabId }, 'Runtime.evaluate', { expression: '1' });
+      releasedAt.set(tabId, Date.now());
+      return true;
+    } catch (error) {
+      attached.delete(tabId);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  return false;
 }
 
 /**
@@ -1527,6 +1592,105 @@ async function evaluateIn(tabId, contextId, expression) {
 }
 
 /** The command table. Every method answers one JSON value. */
+/**
+ * chrome_type for a field whose focus locks the debugger out of the tab.
+ *
+ * Runs in the page's own world, where the snapshot refs live: the value goes in
+ * through the element's native setter (so a framework-controlled input sees the
+ * change) with beforeinput, input and change events, an Enter is a form submit,
+ * and the field is blurred again so the debugger gets the tab back. These are
+ * untrusted events, which is why this is only the fallback, and the result says
+ * so.
+ */
+async function typeByScript(tabId, params, text) {
+  const ref = typeof params.ref === 'number' ? params.ref : null;
+  const selector = typeof params.selector === 'string' ? params.selector : null;
+  const submit = params.submit === true;
+  const [injection] = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    world: 'MAIN',
+    args: [ref, selector, text, submit],
+    func: (ref, selector, text, submit) => {
+      let el = ref !== null ? (window.__dshChromeRefs || [])[ref - 1] : null;
+      if (!el && selector !== null) el = document.querySelector(selector);
+      if (!el || !el.isConnected) return { error: 'the field is no longer on the page — take a fresh chrome_snapshot' };
+      el.focus();
+      if (typeof el.value === 'string') {
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+        setter.call(el, text);
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (el.isContentEditable) {
+        document.execCommand('insertText', false, text);
+      } else {
+        return { error: 'the target is not a text field' };
+      }
+      let submitted = false;
+      if (submit && el.form) {
+        if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+        submitted = true;
+      }
+      const value = typeof el.value === 'string' ? el.value : el.innerText;
+      const secret = el.type === 'password';
+      el.blur();
+      return { value: secret ? null : String(value).slice(0, 500), length: String(value).length, secret: secret, submitted: submitted };
+    },
+  });
+  const result = injection ? injection.result : null;
+  if (!result || result.error) throw new Error(result && result.error ? result.error : 'typing by script failed');
+  await releaseForeignFrame(tabId);
+  const value = result.secret ? '(hidden: ' + result.length + ' characters)' : result.value;
+  return {
+    typed: text !== '',
+    submitted: result.submitted,
+    value: value,
+    matches: result.secret ? result.length >= text.length : result.value.indexOf(text) !== -1,
+    note: 'typed by script, not keystrokes: another extension (often a password manager\'s autofill menu) locks the '
+      + 'debugger out of this tab while the field has focus'
+      + (submit && !result.submitted ? '; Enter could not be pressed, and the field has no form to submit' : ''),
+  };
+}
+
+/**
+ * chrome_type's normal path: a real click into the field, inserted text, and
+ * the field read back.
+ */
+async function typeWithInput(params) {
+  const tabId = await resolveTabId(params.tabId);
+  const text = typeof params.text === 'string' ? params.text : '';
+  const frameKey = normaliseFrameKey(params.frame);
+  const named = typeof params.ref === 'number' || typeof params.selector === 'string';
+  // A real click puts focus where a user's would, runs the page's own focus
+  // handlers, and goes through the click's hit test, so a covered or stale
+  // field is refused instead of typed past.
+  if (named) await COMMANDS.click({ ref: params.ref, selector: params.selector, frame: params.frame, tabId: tabId });
+  const field = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, true));
+  if (!field || field.focused !== true) {
+    throw new Error(named
+      ? 'clicked the field but focus went to ' + (field ? field.active : 'nothing')
+        + ' — it may be disabled, read-only, or a custom widget; take a fresh chrome_snapshot'
+      : 'nothing is focused to type into — pass a ref or selector');
+  }
+  if (text !== '') await cdp(tabId, 'Input.insertText', { text: text });
+  // Read the field back: a page can reformat, truncate or reject what was
+  // typed, and the model must see what the field really holds.
+  const after = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, false));
+  const submit = params.submit === true;
+  if (submit) await COMMANDS.key({ key: 'Enter', tabId: tabId });
+  let value;
+  let matches;
+  if (after && typeof after.value === 'string') {
+    value = after.value;
+    matches = after.value.indexOf(text) !== -1;
+  } else {
+    value = after && after.secret ? '(hidden: ' + after.length + ' characters)' : '(not a text field)';
+    matches = !!after && after.length >= text.length;
+  }
+  return { typed: text !== '', submitted: submit, value: value, matches: matches };
+}
+
 const COMMANDS = {
 
   /**
@@ -1948,36 +2112,18 @@ const COMMANDS = {
 
   async type(params) {
     const tabId = await resolveTabId(params.tabId);
-    const text = typeof params.text === 'string' ? params.text : '';
-    const frameKey = normaliseFrameKey(params.frame);
     const named = typeof params.ref === 'number' || typeof params.selector === 'string';
-    // A real click puts focus where a user's would, runs the page's own focus
-    // handlers, and goes through the click's hit test, so a covered or stale
-    // field is refused instead of typed past.
-    if (named) await COMMANDS.click({ ref: params.ref, selector: params.selector, frame: params.frame, tabId: tabId });
-    const field = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, true));
-    if (!field || field.focused !== true) {
-      throw new Error(named
-        ? 'clicked the field but focus went to ' + (field ? field.active : 'nothing')
-          + ' — it may be disabled, read-only, or a custom widget; take a fresh chrome_snapshot'
-        : 'nothing is focused to type into — pass a ref or selector');
+    const started = Date.now();
+    try {
+      return await typeWithInput(params);
+    } catch (error) {
+      // A login field whose focus brings a password manager's frame in cannot be
+      // typed into through the debugger: every focus locks the tab again. Only
+      // then, and only for a named field on the main page, the text goes in by script.
+      const released = (releasedAt.get(tabId) || 0) >= started;
+      if (!released || !named || normaliseFrameKey(params.frame) !== '') throw error;
+      return typeByScript(tabId, params, typeof params.text === 'string' ? params.text : '');
     }
-    if (text !== '') await cdp(tabId, 'Input.insertText', { text: text });
-    // Read the field back: a page can reformat, truncate or reject what was
-    // typed, and the model must see what the field really holds.
-    const after = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, false));
-    const submit = params.submit === true;
-    if (submit) await COMMANDS.key({ key: 'Enter', tabId: tabId });
-    let value;
-    let matches;
-    if (after && typeof after.value === 'string') {
-      value = after.value;
-      matches = after.value.indexOf(text) !== -1;
-    } else {
-      value = after && after.secret ? '(hidden: ' + after.length + ' characters)' : '(not a text field)';
-      matches = !!after && after.length >= text.length;
-    }
-    return { typed: text !== '', submitted: submit, value: value, matches: matches };
   },
 
   async key(params) {

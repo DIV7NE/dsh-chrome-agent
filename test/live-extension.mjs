@@ -626,6 +626,26 @@ try {
   const closedLeave = await call('close', { tabId: leave.tabId, dialog: 'accept' });
   check('closing it with accept showed no warning and did not move the view', closedLeave.dialogs === undefined && await activeNow() === viewBefore, { closedLeave, after: await activeNow() });
 
+  // --- a real login form, which a password manager will want to fill ---------
+  // With one installed (Bitwarden here), focusing these fields injects its
+  // frame and Chrome locks the debugger out of the tab; the extension must get
+  // the tab back and still fill the form. Without one, the same checks pass on
+  // the ordinary path, so the note says which path ran.
+  console.log('');
+  console.log('login form');
+  const login = await call('open', { url: 'https://example.com/?login', newTab: true });
+  await call('eval', { tabId: login.tabId, expression: '(function () { document.body.innerHTML = \'<form id="lf" action="#" onsubmit="window.__submitted = (window.__submitted || 0) + 1; return false;"><input id="user" name="username" autocomplete="username" style="position:absolute;left:20px;top:20px"><input id="pw" type="password" name="password" autocomplete="current-password" style="position:absolute;left:20px;top:80px"><button id="go" style="position:absolute;left:20px;top:140px">Sign in</button></form>\'; return "ok"; })()' });
+  const typedUser = await call('type', { selector: '#user', text: 'alice@example.com', tabId: login.tabId });
+  console.log('        path: ' + (typedUser.note ? 'script fallback (' + typedUser.note.slice(0, 60) + '…)' : 'keystrokes'));
+  check('a login form\'s username is filled and read back', typedUser.value === 'alice@example.com' && typedUser.matches === true, typedUser);
+  const typedPw = await call('type', { selector: '#pw', text: 'hunter22', submit: true, tabId: login.tabId });
+  check('its password is filled, reported only as a length', /hidden: 8 characters/.test(typedPw.value) && typedPw.matches === true, typedPw);
+  const submitted = await call('eval', { tabId: login.tabId, expression: 'window.__submitted || 0' });
+  check('submit sends the form', Number(submitted.result) >= 1, { submitted, typedPw });
+  const loginSnap = await call('snapshot', { tabId: login.tabId });
+  check('the tab answers ordinary commands afterwards', /Sign in/.test(loginSnap.snapshot), loginSnap.snapshot.slice(0, 200));
+  await call('close', { tabId: login.tabId });
+
   const stillActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();
   check('the user\'s active tabs never changed', JSON.stringify(stillActive) === JSON.stringify(userActive), { before: userActive, after: stillActive });
 

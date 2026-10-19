@@ -241,8 +241,13 @@ extension is what dials out, so that is where the address belongs.
   agent focuses a login-style field, a password manager such as Bitwarden injects
   its own frame into the page, and Chrome then refuses every debugger command to
   the whole tab — input, capture and reads alike — until focus leaves the field.
-  The error says so. To avoid it, set the password manager's site access to "On
-  click" in `chrome://extensions`, or turn off its inline autofill menu.
+  The extension takes focus off the field through `chrome.scripting` (which is
+  not locked), waits for the tab to come back, and retries the refused command;
+  `chrome_type` fills such a field by script instead of keystrokes and says so in
+  its result. (That recovery is built but not yet verified live with a password
+  manager switched on.) To avoid the lock altogether, set the password manager's
+  site access to "On click" in `chrome://extensions`, or turn off its inline
+  autofill menu.
 - **Background tabs answer at about a frame per second.** Anything that waits for
   a fresh frame — a wheel scroll, a screenshot, a click that opens a dialog —
   takes around one to two seconds on a background tab, against milliseconds on a
