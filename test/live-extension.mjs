@@ -228,6 +228,8 @@ try {
   await call('type', { selector: '#k', text: 'background typing', tabId: bgA.tabId });
   const bgValue = await call('eval', { tabId: bgA.tabId, expression: 'document.activeElement.value' });
   check('typing reaches a background tab', String(bgValue.result).indexOf('background') !== -1, bgValue);
+  // chrome_type clicks its field, so clear that click's mark before testing the click itself.
+  await call('eval', { tabId: bgA.tabId, expression: '(function () { delete document.getElementById("k").dataset.clicked; return "ok"; })()' });
   // The click must actually land, not just leave the tab inactive. A click that
   // dispatches nothing would pass a "the view did not move" check vacuously.
   await call('click', { selector: '#k', tabId: bgA.tabId });
@@ -527,6 +529,28 @@ try {
   check('a frame ref under an overlay is refused', frameError !== null && /covered by div#framecover/.test(frameError), frameError);
   const strayClicks = await clicksOf();
   check('no refused click landed anywhere, not even at 0,0', strayClicks.length === 0, strayClicks);
+
+  // --- typing: a real click into the field, then the field read back --------
+  const typeHtml = '<input id="t1" style="position:absolute;left:20px;top:520px">'
+    + '<input id="t3" maxlength="3" style="position:absolute;left:220px;top:520px">'
+    + '<input id="tpw" type="password" style="position:absolute;left:420px;top:520px">'
+    + '<input id="tcov" style="position:absolute;left:20px;top:580px">'
+    + '<div id="tcovered" style="position:absolute;left:10px;top:570px;width:220px;height:40px;background:red"></div>'
+    + '<div id="tce" contenteditable="true" style="position:absolute;left:220px;top:580px;width:200px">hello</div>';
+  await call('eval', { tabId: acc.tabId, expression: '(function () { document.body.insertAdjacentHTML("beforeend", ' + JSON.stringify(typeHtml) + '); document.getElementById("t1").value = "old"; return "ok"; })()' });
+  const t1 = await call('type', { selector: '#t1', text: 'replaced', tabId: acc.tabId });
+  check('typing replaces the field and reads it back', t1.value === 'replaced' && t1.matches === true, t1);
+  const t3 = await call('type', { selector: '#t3', text: 'abcdef', tabId: acc.tabId });
+  check('a field that truncates is reported, with what it really holds', t3.value === 'abc' && t3.matches === false, t3);
+  const tpw = await call('type', { selector: '#tpw', text: 'hunter22', tabId: acc.tabId });
+  check('a password is read back as a length only', /hidden: 8 characters/.test(tpw.value) && tpw.value.indexOf('hunter') === -1, tpw);
+  let tcovError = null;
+  try { await call('type', { selector: '#tcov', text: 'nope', tabId: acc.tabId }); } catch (error) { tcovError = String(error.message); }
+  const tcovValue = await call('eval', { tabId: acc.tabId, expression: 'document.getElementById("tcov").value' });
+  check('typing into a covered field is refused', tcovError !== null && /covered by div#tcovered/.test(tcovError), tcovError);
+  check('the refused text went nowhere', JSON.parse(tcovValue.result) === '', tcovValue);
+  const tce = await call('type', { selector: '#tce', text: ' world', tabId: acc.tabId });
+  check('a contenteditable is appended to, not wiped', tce.value === 'hello world', tce);
   await call('close', { tabId: acc.tabId });
 
   const stillActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();

@@ -496,6 +496,9 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_type',
     description:
       'Type text into an element, or into whatever is focused when neither `ref` nor `selector` is given. '
+      + 'With a ref or selector it first clicks the field with a real mouse click (refused if the field is covered or gone), '
+      + 'checks the field got focus, replaces an input\'s text (a contenteditable is appended to), then reads the field back. '
+      + 'The result shows what the field really holds — check it when a warning says it differs from what you typed. '
       + 'Set `submit` to press Enter afterwards (search boxes, forms).',
     parameters: {
       text: { type: 'string', required: true, description: 'The text to type.' },
@@ -512,10 +515,17 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { typed: { type: 'boolean', required: true }, submitted: { type: 'boolean', required: true } },
+        properties: {
+          typed: { type: 'boolean', required: true },
+          submitted: { type: 'boolean', required: true },
+          value: { type: 'string', required: true, description: 'What the field holds after typing (a password shows only its length).' },
+          matches: { type: 'boolean', required: true, description: 'Whether the field contains what was typed.' },
+        },
       },
-      render: textRender<{ typed: boolean; submitted: boolean }>(v =>
-        v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.',
+      render: textRender<{ typed: boolean; submitted: boolean; value: string; matches: boolean }>(v =>
+        (v.submitted ? 'Typed the text and pressed Enter.' : 'Typed the text.')
+        + ' The field now reads: ' + JSON.stringify(v.value) + '.'
+        + (v.matches ? '' : ' WARNING: that is not what was typed — the page reformatted, truncated or rejected it.'),
       ),
     },
     execute: async (args: { text: string; ref?: number; selector?: string; submit?: boolean; frame?: string; tabId?: number }, exec) => {

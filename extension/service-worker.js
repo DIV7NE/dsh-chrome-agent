@@ -904,17 +904,41 @@ async function resolveVisiblePoint(tabId, params, prefix) {
   return point;
 }
 
-/** Page-side focus resolver for chrome_type. */
-function focusExpression(params) {
+/**
+ * Page-side: the field chrome_type works on — the ref or selector target, else
+ * whatever has focus — whether focus is in it, and what it holds now.
+ *
+ * With `prepare` it also sets where the text goes: an input's text is selected
+ * so typing replaces it, and a contenteditable's caret moves to the end so
+ * typing appends instead of wiping it. A password's value is never returned,
+ * only its length.
+ */
+function typeFieldExpression(params, prepare) {
   const selector = typeof params.selector === 'string' ? params.selector : null;
   const ref = typeof params.ref === 'number' ? params.ref : null;
   return [
     '(function () {',
+    HIT_TEST_HELPERS,
+    '  var active = document.activeElement;',
+    '  while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;',
     '  var el = null;',
-    ref !== null ? '  el = (window.__dshChromeRefs || [])[' + String(ref - 1) + '];' : '  el = null;',
+    ref !== null ? '  el = (window.__dshChromeRefs || [])[' + String(ref - 1) + '];' : '',
     selector !== null ? '  if (!el) el = document.querySelector(' + JSON.stringify(selector) + ');' : '',
-    '  if (el) { el.focus(); if (el.select && el.value !== undefined) el.select(); return true; }',
-    '  return document.activeElement !== document.body;',
+    '  if (!el) el = active && active !== document.body ? active : null;',
+    '  if (!el) return { focused: false, active: "nothing" };',
+    '  var focused = !!active && (within(active, el) || within(el, active));',
+    prepare ? [
+      '  if (focused && typeof el.select === "function" && typeof el.value === "string") el.select();',
+      '  else if (focused && active.isContentEditable) {',
+      '    var range = document.createRange(); range.selectNodeContents(active); range.collapse(false);',
+      '    var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);',
+      '  }',
+    ].join('\n') : '',
+    '  var field = typeof el.value === "string" ? el : active;',
+    '  var value = field && typeof field.value === "string" ? field.value : field && field.isContentEditable ? field.innerText : null;',
+    '  var secret = !!field && field.type === "password";',
+    '  return { focused: focused, active: active ? describe(active) : "nothing",',
+    '    value: secret || value === null ? null : value.slice(0, 500), length: value === null ? 0 : value.length, secret: secret };',
     '})()',
   ].join('\n');
 }
@@ -1817,14 +1841,35 @@ const COMMANDS = {
   async type(params) {
     const tabId = await resolveTabId(params.tabId);
     const text = typeof params.text === 'string' ? params.text : '';
-    if (text !== '') {
-      const focused = await evaluateInFrame(tabId, normaliseFrameKey(params.frame), focusExpression(params));
-      if (focused !== true) throw new Error('no element to type into — pass a ref or selector');
-      await cdp(tabId, 'Input.insertText', { text: text });
+    const frameKey = normaliseFrameKey(params.frame);
+    const named = typeof params.ref === 'number' || typeof params.selector === 'string';
+    // A real click puts focus where a user's would, runs the page's own focus
+    // handlers, and goes through the click's hit test, so a covered or stale
+    // field is refused instead of typed past.
+    if (named) await COMMANDS.click({ ref: params.ref, selector: params.selector, frame: params.frame, tabId: tabId });
+    const field = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, true));
+    if (!field || field.focused !== true) {
+      throw new Error(named
+        ? 'clicked the field but focus went to ' + (field ? field.active : 'nothing')
+          + ' — it may be disabled, read-only, or a custom widget; take a fresh chrome_snapshot'
+        : 'nothing is focused to type into — pass a ref or selector');
     }
+    if (text !== '') await cdp(tabId, 'Input.insertText', { text: text });
+    // Read the field back: a page can reformat, truncate or reject what was
+    // typed, and the model must see what the field really holds.
+    const after = await evaluateInFrame(tabId, frameKey, typeFieldExpression(params, false));
     const submit = params.submit === true;
     if (submit) await COMMANDS.key({ key: 'Enter', tabId: tabId });
-    return { typed: text !== '', submitted: submit };
+    let value;
+    let matches;
+    if (after && typeof after.value === 'string') {
+      value = after.value;
+      matches = after.value.indexOf(text) !== -1;
+    } else {
+      value = after && after.secret ? '(hidden: ' + after.length + ' characters)' : '(not a text field)';
+      matches = !!after && after.length >= text.length;
+    }
+    return { typed: text !== '', submitted: submit, value: value, matches: matches };
   },
 
   async key(params) {

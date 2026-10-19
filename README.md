@@ -86,7 +86,7 @@ to pay the one-time Chrome Web Store fee.
 | `chrome_open` | Navigate a tab, or open a new one. |
 | `chrome_snapshot` | The page as a text tree of interactive elements, each with `[ref=N]`. |
 | `chrome_click` | Click by `ref`, CSS selector, or coordinates, with trusted mouse events. |
-| `chrome_type` | Type into an element (or the focused one); optional Enter. |
+| `chrome_type` | Click into a field with a real click, type, and read back what the field now holds (a password reports only its length); optional Enter. |
 | `chrome_key` | One key or chord, e.g. `Enter`, `PageDown`, `Control+a`. |
 | `chrome_eval` | Evaluate JavaScript in the page. |
 | `chrome_screenshot` | The visible area, saved to a path: PNG, or JPEG when the capture is large enough to need re-encoding. The result reports which format it encoded. |
