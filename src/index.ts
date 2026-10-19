@@ -450,8 +450,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Click an element. Prefer `ref` from the latest chrome_snapshot. Use `selector` for a CSS selector, '
       + 'or `x`/`y` for raw viewport coordinates. Dispatches trusted input events at the element\'s centre. '
-      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
-      + 'for the moment it acts, moving the user\'s view there.',
+      + 'Works on a background tab without moving the user\'s view.',
     parameters: {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot (e.g. 7).' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
@@ -527,8 +526,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     description:
       'Press a single key or chord on the page, e.g. "Enter", "Escape", "PageDown", "Control+a". '
       + 'Use chrome_type for text and this for navigation and shortcuts. '
-      + 'Chrome drops key events on tabs that are not visible, so this brings the agent\'s tab '
-      + 'to the front for the moment it acts, moving the user\'s view there.',
+      + 'Works on a background tab without moving the user\'s view.',
     parameters: {
       key: { type: 'string', required: true, description: 'Key or chord, e.g. "Tab", "Control+Enter".' },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
@@ -621,8 +619,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_hover',
     description:
       'Move the pointer over an element without clicking. Use it to open hover menus and tooltips, or to make a page reveal controls before you click them. '
-      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
-      + 'for the moment it acts, moving the user\'s view there.',
+      + 'Works on a background tab without moving the user\'s view.',
     parameters: {
       ref: { type: 'integer', description: 'Element ref from chrome_snapshot.' },
       selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
@@ -652,8 +649,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_drag',
     description:
       'Drag from one point to another, e.g. a slider, a sortable row, or a canvas handle. Give each end as a snapshot ref, a CSS selector, or x+y coordinates. This drives mouse events, so it does not move native HTML5 drag-and-drop payloads (file drops, native reordering). '
-      + 'Chrome routes no mouse input to a hidden tab, so this brings the agent\'s tab to the front '
-      + 'for the moment it acts, moving the user\'s view there.',
+      + 'Works on a background tab without moving the user\'s view.',
     parameters: {
       fromRef: { type: 'integer', description: 'Start element ref from chrome_snapshot.' },
       fromSelector: { type: 'string', description: 'Start CSS selector.' },
@@ -690,7 +686,9 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_scroll',
     description:
-      'Scroll the page. Pass a ref or selector to bring that element into view, or no target to scroll by deltaY (default 600, positive scrolls down). Most pages need scrolling before their content is in the snapshot or reachable by a click.',
+      'Scroll the page. Pass a ref or selector to bring that element into view, or no target to scroll by deltaY (default 600, positive scrolls down) '
+      + 'with a real mouse wheel at the viewport centre; the result says how many pixels actually moved, or that nothing did. '
+      + 'Works on a background tab without moving the user\'s view. Most pages need scrolling before their content is in the snapshot or reachable by a click.',
     parameters: {
       ref: { type: 'integer', description: 'Element to scroll into view.' },
       selector: { type: 'string', description: 'CSS selector to scroll into view.' },

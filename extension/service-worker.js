@@ -274,6 +274,17 @@ async function ensureAttached(tabId) {
       // A target that refuses a domain still serves the others.
     }
   }
+  // Focus emulation makes Chrome render a background tab as if it were shown,
+  // and a rendered tab is one trusted input reaches. Measured in
+  // test/probe-background-input.mjs: without it a background tab dropped the
+  // click and the first mouse event stalled ~5s; with it click, key and wheel
+  // landed in milliseconds, in a background tab, in a collapsed group and in a
+  // minimised window — without the user's view ever moving.
+  try {
+    await chrome.debugger.sendCommand(target, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+  } catch (error) {
+    // ensureInputReady reports a tab that is still not rendering.
+  }
   attached.add(tabId);
 }
 
@@ -793,19 +804,12 @@ async function resolvePoint(tabId, params, prefix) {
 }
 
 /**
- * Resolve a target on the page as it will be when the input is dispatched.
+ * Resolve a target and refuse it unless it lies inside the viewport.
  *
- * `resolvePoint` reads the page while the tab may still be in the background. A
- * background tab that has had `scrollIntoView` applied but has never been shown
- * has not committed that scroll, so when `ensureVisible` brings it forward the
- * page settles back to its committed offset and a point resolved before the
- * activation is stale. Measured on the frame fixture: the frame was scrolled
- * into view, then the page snapped 900px the other way before the mouse events
- * went out, and the click reported success without landing. Re-reading after
- * activation is what makes the dispatched point match the page.
- *
- * The caller resolves and validates once before activation as well, because a
- * command that is going to be refused must not move the user's view.
+ * Call it only after ensureInputReady. A tab Chrome is not rendering does not
+ * commit a `scrollIntoView`: measured on the frame fixture, a point resolved on
+ * an unrendered tab was 900px off by the time input went out, and the click
+ * reported success without landing.
  */
 async function resolveVisiblePoint(tabId, params, prefix) {
   const point = await resolvePoint(tabId, params, prefix);
@@ -844,10 +848,37 @@ function scrollToExpression(params) {
   ].join('\n');
 }
 
-/** Page-side: scroll the window by a pixel delta. */
-function scrollByExpression(deltaX, deltaY) {
-  return 'window.scrollBy(' + Math.round(deltaX) + ', ' + Math.round(deltaY) + ')';
+/**
+ * Page-side: find what a wheel at (x, y) would scroll — the nearest ancestor
+ * that scrolls and has room in the wheel's direction, else the document — and
+ * stash it so the same element can be read and scrolled afterwards.
+ */
+function wheelTargetExpression(x, y, deltaX, deltaY) {
+  return [
+    '(function () {',
+    '  function room(el) {',
+    '    var down = el.scrollHeight - el.clientHeight - el.scrollTop;',
+    '    var right = el.scrollWidth - el.clientWidth - el.scrollLeft;',
+    '    return (' + deltaY + ' > 0 && down > 0) || (' + deltaY + ' < 0 && el.scrollTop > 0)',
+    '      || (' + deltaX + ' > 0 && right > 0) || (' + deltaX + ' < 0 && el.scrollLeft > 0);',
+    '  }',
+    '  var root = document.scrollingElement || document.documentElement;',
+    '  var el = document.elementFromPoint(' + Math.round(x) + ', ' + Math.round(y) + ');',
+    '  while (el && el !== root) {',
+    '    var style = getComputedStyle(el);',
+    '    if (/(auto|scroll|overlay)/.test(style.overflowY + " " + style.overflowX) && room(el)) break;',
+    '    el = el.parentElement;',
+    '  }',
+    '  if (!el) el = root;',
+    '  window.__dshWheelTarget = el;',
+    '  return { left: el.scrollLeft, top: el.scrollTop, room: room(el) };',
+    '})()',
+  ].join('\n');
 }
+
+/** Page-side: where the stashed wheel target is scrolled to now. */
+const WHEEL_TARGET_POSITION = '(function () { var el = window.__dshWheelTarget;'
+  + ' return el ? { left: el.scrollLeft, top: el.scrollTop } : null; })()';
 
 /**
  * Page-side: the readable text of the page.
@@ -1108,44 +1139,24 @@ async function ensureLive(tabId) {
 }
 
 /**
- * Bring a tab to the front for the moment an action needs input to reach it.
+ * Make sure trusted input will reach a tab, without ever moving the user's view.
  *
- * Chrome routes no input to a tab that is not visible: the renderer has no
- * focused frame and drops the event silently. Measured, same page and same
- * click, only visibility differing: on a background tab a main-frame click
- * fired nothing and a click on a frame ref fired nothing, while both fired on
- * a visible tab. Keys behave the same way — Control+a on a background tab
- * produced zero keydowns and left the selection empty. No CDP flag changes
- * this, so key, click, hover and drag all call this before dispatching input.
- *
- * It moves the user's view, so only the paths that need it may call it. Text
- * entry does not: Input.insertText takes a different path and works on a
- * background tab. Scrolling does not either: its wheel path is bounded and
- * falls back to a scripted window.scrollBy, so it works hidden without a move.
+ * Chrome drops input to a tab it is not rendering, and stalls every mouse event
+ * on it for about five seconds. Focus emulation (set in ensureAttached) makes
+ * Chrome render the tab wherever it is, so the page reports itself visible.
+ * The switch can take a frame to show, hence the short poll. A tab that still
+ * reports hidden is refused rather than brought forward: the user's view is
+ * not the agent's to take, and input sent anyway would be lost.
  */
-async function ensureVisible(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  if (!tab.active) {
-    await chrome.tabs.update(tabId, { active: true });
-    // Activation is not composited the instant update() resolves; without this
-    // beat the first event can still land on a tab Chrome has not shown yet.
-    await new Promise(resolve => setTimeout(resolve, 250));
+async function ensureInputReady(tabId) {
+  await ensureAttached(tabId);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (await evaluate(tabId, 'document.visibilityState === "visible"')) return;
+    if (attempt === 4) await cdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
-  const window = await chrome.windows.get(tab.windowId);
-  if (window.focused) return;
-  // In front is not the requirement — being composited is. Measured with this
-  // window visible but behind another app, document.visibilityState was
-  // 'visible' and a click landed in 331ms without the window ever being
-  // focused, so taking the user's focus here would be rude and pointless.
-  // Only a window Chrome is compositing nothing for is a problem: minimised,
-  // or fully covered, its visibilityState reads 'hidden' and the same click
-  // stalled for 5007ms. Ask the page which case this is.
-  if (await evaluate(tabId, 'document.visibilityState === "visible"')) return;
-  // Nothing is being painted, so every mouse event would stall for seconds.
-  // Bringing the window forward is the only way to give it frames, and it
-  // costs the user their focus — which is why it is the last resort.
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await new Promise(resolve => setTimeout(resolve, 250));
+  throw new Error('tab ' + tabId + ' is not being rendered, so input sent to it would be dropped — '
+    + 'reload the tab, or check that DevTools or another debugger is not attached to it');
 }
 
 /** Add the agent group to a tab listing, and whether the agent may act on it. */
@@ -1195,28 +1206,52 @@ async function describeTab(tabId) {
 }
 
 /**
- * One screenshot capture, taking the view only if a background one is refused.
+ * One screenshot capture. It never activates the tab.
  *
- * `backgroundOnly` forbids the activation fallback. The JPEG ladder sets it: by
- * then the PNG has already succeeded, so the only reason to retry is size, and
- * moving the user's view for a re-encode would be a poor trade. A refused
- * background JPEG is a skipped attempt instead, which the ladder records as a
- * null size.
+ * `backgroundOnly` turns a failure into null instead of an error. The JPEG
+ * ladder sets it: the PNG has already succeeded, so a failed re-encode is a
+ * skipped attempt, which the ladder records as a null size.
  */
 async function captureOnce(tabId, options) {
   const backgroundOnly = options.backgroundOnly === true;
-  const params = Object.assign({ fromSurface: true }, options);
-  delete params.backgroundOnly;
   try {
-    // A background tab is the normal case: the agent must not move the user's
-    // view to see a page. Bounded, so a frozen renderer cannot hang the call.
-    return await withTimeout(cdp(tabId, 'Page.captureScreenshot', params), 8000);
+    return await withTimeout(screencastFrame(tabId, options), 8000);
   } catch (error) {
     if (backgroundOnly) return null;
-    // Only when the background capture genuinely cannot be produced.
-    await chrome.tabs.update(tabId, { active: true });
-    await new Promise(resolve => setTimeout(resolve, 400));
-    return await cdp(tabId, 'Page.captureScreenshot', params);
+    // Never activate the tab to retry: the user's view is not the agent's to take.
+    throw new Error('screenshot failed: ' + describe(error));
+  }
+}
+
+/**
+ * One frame of the page, taken from a screencast rather than Page.captureScreenshot.
+ *
+ * On a background tab under focus emulation, captureScreenshot alternated
+ * between succeeding and hanging until its timeout — measured in
+ * test/probe-capture-variants.mjs, six captures went ok, 8s timeout, ok,
+ * timeout, ok, timeout. The first screencast frame arrived every time, in
+ * 1.2-1.4s.
+ */
+async function screencastFrame(tabId, options) {
+  await ensureAttached(tabId);
+  let listener = null;
+  const frame = new Promise(resolve => {
+    listener = (source, method, event) => {
+      if (!source || source.tabId !== tabId || method !== 'Page.screencastFrame') return;
+      chrome.debugger.sendCommand({ tabId: tabId }, 'Page.screencastFrameAck', { sessionId: event.sessionId })
+        .catch(() => { /* the screencast is stopping anyway */ });
+      resolve({ data: event.data });
+    };
+    chrome.debugger.onEvent.addListener(listener);
+  });
+  const params = { format: options.format === 'jpeg' ? 'jpeg' : 'png', everyNthFrame: 1 };
+  if (typeof options.quality === 'number') params.quality = options.quality;
+  try {
+    await cdp(tabId, 'Page.startScreencast', params);
+    return await frame;
+  } finally {
+    chrome.debugger.onEvent.removeListener(listener);
+    await cdp(tabId, 'Page.stopScreencast', {}).catch(() => { /* the tab may be gone */ });
   }
 }
 
@@ -1409,16 +1444,12 @@ const COMMANDS = {
 
   async click(params) {
     const tabId = await resolveTabId(params.tabId);
-    let x = typeof params.x === 'number' ? params.x : null;
-    let y = typeof params.y === 'number' ? params.y : null;
-    let label = 'coordinates ' + x + ',' + y;
-    if (x === null || y === null) {
-      const point = await resolvePoint(tabId, params, '');
-      if (!point) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
-      x = point.x;
-      y = point.y;
-      label = point.label;
-    }
+    await ensureInputReady(tabId);
+    const placed = await resolveVisiblePoint(tabId, params, '');
+    if (!placed) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
+    const x = placed.x;
+    const y = placed.y;
+    const label = placed.label;
     // Out of the way first. The click itself is CDP input and never touches the
     // overlay; hiding it just keeps the overlay out of whatever frame is
     // captured next, and shows the human the page rather than the pointer.
@@ -1429,22 +1460,6 @@ const COMMANDS = {
     const held = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
     const clicks = params.clicks === 3 ? 3 : params.clicks === 2 ? 2 : 1;
     const at = { x: x, y: y, modifiers: 0, button: button };
-    // Validate before ensureVisible: a refused click must not move the user's view.
-    await assertInViewport(tabId, [{ x: x, y: y, label: label }]);
-    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
-    // resolved and validated, so a command that then fails has not moved the view.
-    await ensureVisible(tabId);
-    // Activation can settle the page back to its committed scroll, moving a
-    // target that was resolved while the tab was still hidden. Re-read it now so
-    // the dispatched point matches the page at dispatch time; see
-    // resolveVisiblePoint.
-    const placed = await resolveVisiblePoint(tabId, params, '');
-    if (!placed) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
-    x = placed.x;
-    y = placed.y;
-    label = placed.label;
-    at.x = x;
-    at.y = y;
     await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved', buttons: 0, force: 0 }, at, { button: 'none' }));
     for (let count = 1; count <= clicks; count += 1) {
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: held, clickCount: count, force: 0.5 }, at));
@@ -1456,13 +1471,7 @@ const COMMANDS = {
 
   async hover(params) {
     const tabId = await resolveTabId(params.tabId);
-    const point = await resolvePoint(tabId, params, '');
-    if (!point) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
-    await assertInViewport(tabId, [{ x: point.x, y: point.y, label: point.label }]);
-    // Mouse input reaches no hidden tab; see ensureVisible. After the target is
-    // resolved, so a command that then fails has not moved the view.
-    await ensureVisible(tabId);
-    // Re-read after activation: see resolveVisiblePoint.
+    await ensureInputReady(tabId);
     const placed = await resolveVisiblePoint(tabId, params, '');
     if (!placed) throw new Error('hover target not found — take a fresh chrome_snapshot and use its ref');
     await cdp(tabId, 'Input.dispatchMouseEvent', {
@@ -1474,23 +1483,11 @@ const COMMANDS = {
 
   async drag(params) {
     const tabId = await resolveTabId(params.tabId);
-    let start = await resolvePoint(tabId, params, 'from');
-    let end = await resolvePoint(tabId, params, 'to');
-    if (!start || !end) {
-      throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
-    }
-    // Both ends, before the view moves: an interpolated path between two in-view
-    // points is itself in view, so only the ends need checking.
-    await assertInViewport(tabId, [
-      { x: start.x, y: start.y, label: start.label },
-      { x: end.x, y: end.y, label: end.label },
-    ]);
-    // Mouse input reaches no hidden tab; see ensureVisible. After both ends are
-    // resolved and validated, so a command that then fails has not moved the view.
-    await ensureVisible(tabId);
-    // Re-read both ends after activation: see resolveVisiblePoint.
-    start = await resolveVisiblePoint(tabId, params, 'from');
-    end = await resolveVisiblePoint(tabId, params, 'to');
+    await ensureInputReady(tabId);
+    // Only the ends need the viewport check: an interpolated path between two
+    // in-view points is itself in view.
+    const start = await resolveVisiblePoint(tabId, params, 'from');
+    const end = await resolveVisiblePoint(tabId, params, 'to');
     if (!start || !end) {
       throw new Error('drag needs a from and a to target (fromRef/fromSelector or fromX+fromY, and the same for to)');
     }
@@ -1527,28 +1524,52 @@ const COMMANDS = {
     // the one point guaranteed to be over the document.
     const centre = await evaluate(tabId, 'JSON.stringify({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) })');
     const point = JSON.parse(String(centre));
-    // Chrome only answers wheel input when the compositor is actually rendering
-    // the tab, and a tab nobody is showing never acks — the call just sits
-    // there. Ask which case this is instead of paying a timeout to find out.
-    // Measured, same tab and same call: hidden, 1515ms spent waiting for a wheel
-    // that never acked and 0 pixels scrolled; visible, 3-8ms. The bound stays as
-    // a net for a renderer that is compositing and still not answering, and it
-    // is short because a wheel that works acks in single-digit milliseconds.
-    if (await evaluate(tabId, 'document.visibilityState === "visible"')) {
-      try {
-        await withTimeout(cdp(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseWheel', x: point.x, y: point.y, deltaX: deltaX, deltaY: deltaY,
-          button: 'none', buttons: 0, modifiers: 0,
-        }), 250);
-        return { scrolled: 'wheel ' + deltaX + ',' + deltaY };
-      } catch (error) {
-        /* compositing but silent — fall through and scroll it directly */
-      }
+    // Chrome only acks a wheel on a tab it is rendering; ensureInputReady makes
+    // sure it is.
+    await ensureInputReady(tabId);
+    const before = await evaluate(tabId, wheelTargetExpression(point.x, point.y, deltaX, deltaY));
+    if (!before || before.room !== true) {
+      return { scrolled: 'nothing: already at the end in that direction' };
     }
-    // A hidden tab gets no wheel, so scroll it directly instead of moving the
-    // user's view to the tab.
-    await evaluate(tabId, scrollByExpression(deltaX, deltaY));
-    return { scrolled: 'scripted ' + deltaX + ',' + deltaY };
+    try {
+      // The ack can take 200-1000ms on the first wheel after attaching.
+      await withTimeout(cdp(tabId, 'Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x: point.x, y: point.y, deltaX: deltaX, deltaY: deltaY,
+        button: 'none', buttons: 0, modifiers: 0,
+      }), 1500);
+    } catch (error) {
+      /* unacked — the read below says whether it scrolled */
+    }
+    // An acked wheel is not yet a scrolled page. Measured in
+    // test/probe-scroll-commit.mjs: on a background tab the first wheel after
+    // attaching is held until Chrome next produces a frame. It then lands on top
+    // of whatever the page did meanwhile, so a JS scroll made in between
+    // (scrollIntoView before a click) is overridden and the click misses. Input
+    // produces a frame, so a move at the same point applies the wheel now; a
+    // capture is the fallback that always produces one. The wheel is never
+    // re-sent: a held wheel plus a re-send scrolls twice (measured: 1800px for
+    // one 900px request).
+    const movedBy = async () => {
+      const after = await evaluate(tabId, WHEEL_TARGET_POSITION);
+      return after ? Math.round(Math.abs(after.top - before.top) + Math.abs(after.left - before.left)) : 0;
+    };
+    await cdp(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0, modifiers: 0,
+    });
+    let moved = 0;
+    for (const started = Date.now(); Date.now() - started < 1000; ) {
+      moved = await movedBy();
+      if (moved > 0) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (moved === 0) {
+      await captureOnce(tabId, { format: 'jpeg', quality: 10, backgroundOnly: true });
+      moved = await movedBy();
+    }
+    if (moved === 0) {
+      return { scrolled: 'nothing: the wheel was sent but nothing scrolled — the page may handle the wheel itself' };
+    }
+    return { scrolled: 'wheel ' + deltaX + ',' + deltaY + ', moved ' + moved + 'px' };
   },
 
   /**
@@ -1721,8 +1742,8 @@ const COMMANDS = {
 
   async key(params) {
     const tabId = await resolveTabId(params.tabId);
-    // Keys are dropped on a hidden tab exactly like mouse input; see ensureVisible.
-    await ensureVisible(tabId);
+    // Keys are dropped on an unrendered tab exactly like mouse input.
+    await ensureInputReady(tabId);
     const descriptor = keyDescriptor(params.key);
     const shared = {
       key: descriptor.key,

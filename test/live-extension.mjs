@@ -28,7 +28,9 @@ function check(name, condition, detail) {
 }
 
 let socket = null;
-const wss = new WebSocketServer({ port: PORT });
+// 127.0.0.1, where the extension dials: on 0.0.0.0 a running DSH server holding
+// 127.0.0.1 on the same port takes the extension and this suite just times out.
+const wss = new WebSocketServer({ port: PORT, host: '127.0.0.1' });
 let nextId = 0;
 const waiting = new Map();
 
@@ -82,6 +84,8 @@ console.log('waiting up to 90s for the extension (options page port must be ' + 
 try {
   await waitForExtension(90000);
   await new Promise(r => setTimeout(r, 500));
+  // The tab the user is looking at in each window. Nothing in this suite may change it.
+  const userActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();
 
   const tabs = await call('tabs');
   check('tabs returns a list', Array.isArray(tabs) && tabs.length > 0, tabs);
@@ -91,7 +95,8 @@ try {
   check('open lands on the url', String(opened.url).indexOf('example.com') !== -1, opened.url);
 
   const snap = await call('snapshot', { tabId: opened.tabId });
-  check('snapshot sees the page', snap.snapshot.indexOf('Example Domain') !== -1, snap.snapshot.slice(0, 200));
+  // example.com dropped its "Example Domain" heading in 2026; the phrase now lives only in <title>.
+  check('snapshot sees the page', snap.snapshot.indexOf('documentation examples') !== -1, snap.snapshot.slice(0, 200));
   check('snapshot exposes refs', /\[ref=1\]/.test(snap.snapshot), snap.snapshot.slice(0, 200));
 
   const title = await call('eval', { expression: 'document.title', tabId: opened.tabId });
@@ -153,9 +158,9 @@ try {
     tabId: form.tabId,
   });
   check('a modifier chord selects the field', Number(selected.result) > 0, selected);
-  // Key events need a visible tab; assert the documented exception holds.
+  // The chord above landed, and focus emulation is what let it land without activating the tab.
   const afterKey = (await call('tabs')).find(t => t.id === form.tabId);
-  check('a key press brings its tab forward', !!afterKey && afterKey.active === true, afterKey);
+  check('a key press leaves its tab in the background', !!afterKey && afterKey.active === false, afterKey);
 
   // The same page captured while it is a BACKGROUND tab must not go blank.
   const background = await call('screenshot', { tabId: opened.tabId });
@@ -225,10 +230,11 @@ try {
   check('typing reaches a background tab', String(bgValue.result).indexOf('background') !== -1, bgValue);
   // The click must actually land, not just leave the tab inactive. A click that
   // dispatches nothing would pass a "the view did not move" check vacuously.
-  // Mouse input reaches no hidden tab, so the command activates it first.
   await call('click', { selector: '#k', tabId: bgA.tabId });
   const clickLanding = await call('eval', { tabId: bgA.tabId, expression: 'document.getElementById("k").dataset.clicked === "yes"' });
   check('a click on a background tab actually reaches the page', String(clickLanding.result) === 'true', clickLanding);
+  const afterClick = (await call('tabs')).find(t => t.id === bgA.tabId);
+  check('a click leaves its tab in the background', !!afterClick && afterClick.active === false, afterClick);
 
   // Targeting: a command with no tabId must use the agent's own tab. The old
   // fallback was "the active tab of the last focused window", which means a bare
@@ -409,19 +415,13 @@ try {
   check('a match from a frame says which frame it came from',
     framedFind.matches.some(m => /^\[f\d+\]/.test(m)), framedFind.matches);
 
-  // A background tab gets no wheel event from the compositor, and Chrome never
-  // acks the call. It must fall back quickly rather than burn the caller's
-  // whole timeout, so time it with the tab deliberately put in the background.
-  const allTabs = await call('tabs');
-  const other = allTabs.filter(t => t.id !== cap.tabId && /^https?:/i.test(t.url))[0];
-  if (other) {
-    await call('key', { key: 'Escape', tabId: other.id });
-    const bgStart = Date.now();
-    const bg = await call('scroll', { deltaY: 400, tabId: cap.tabId }, 12000);
-    const bgElapsed = Date.now() - bgStart;
-    check('a background-tab scroll falls back instead of hanging', bgElapsed < 6000, { bgElapsed, bg });
-    await call('key', { key: 'Escape', tabId: cap.tabId });
-  }
+  // The agent's tab is in the background here; focus emulation must let a real
+  // wheel through rather than leave it to the scripted fallback.
+  const bgStart = Date.now();
+  const bg = await call('scroll', { deltaY: 400, tabId: cap.tabId }, 12000);
+  const bgElapsed = Date.now() - bgStart;
+  check('a background-tab scroll is a real wheel', /^wheel/.test(String(bg.scrolled)), bg);
+  check('a background-tab scroll does not hang', bgElapsed < 3000, { bgElapsed });
 
   await call('hover', { selector: '#b', tabId: cap.tabId });
   const afterHover = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
@@ -476,6 +476,9 @@ try {
   await call('upload', { files: [uploadPath], selector: '#f', tabId: cap.tabId });
   const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
+
+  const stillActive = (await call('tabs')).filter(t => t.active).map(t => t.id).sort();
+  check('the user\'s active tabs never changed', JSON.stringify(stillActive) === JSON.stringify(userActive), { before: userActive, after: stillActive });
 
   // Close every test tab, including litter from earlier runs.
   const everything = await call('tabs');

@@ -85,9 +85,9 @@ to pay the one-time Chrome Web Store fee.
 | `chrome_tabs` | Every open tab: id, title, url, which is active, and whether it is the agent's own (`agent: true|false`). |
 | `chrome_open` | Navigate a tab, or open a new one. |
 | `chrome_snapshot` | The page as a text tree of interactive elements, each with `[ref=N]`. |
-| `chrome_click` | Click by `ref`, CSS selector, or coordinates. Brings the tab to the front first. |
+| `chrome_click` | Click by `ref`, CSS selector, or coordinates, with trusted mouse events. |
 | `chrome_type` | Type into an element (or the focused one); optional Enter. |
-| `chrome_key` | One key or chord, e.g. `Enter`, `PageDown`, `Control+a`. Brings the tab to the front first. |
+| `chrome_key` | One key or chord, e.g. `Enter`, `PageDown`, `Control+a`. |
 | `chrome_eval` | Evaluate JavaScript in the page. |
 | `chrome_screenshot` | The visible area, saved to a path: PNG, or JPEG when the capture is large enough to need re-encoding. The result reports which format it encoded. |
 
@@ -112,22 +112,12 @@ opening one **does not move your view**: the tab is created inactive and loads i
 the background. You can collapse the group and forget it, or open it to watch.
 Closing the group closes the agent's work; your own tabs are untouched.
 
-Reads stay in the background too. Snapshots, evaluations, text, network and
-console all work on a tab without bringing it forward, and screenshots follow the
-same rule — the agent sees a background tab without bringing it forward. Only if
-a background capture genuinely cannot be produced does it fall back to activating
-the tab, which is a last resort rather than the default. A tab Chrome has
-discarded to save memory is reloaded first, because a discarded tab has no
-renderer to capture.
-
-Sending input is the exception. Chrome routes neither keys nor mouse events to a
-tab that is not visible, so `chrome_key`, `chrome_click`, `chrome_hover` and
-`chrome_drag` bring the agent's tab to the front for the moment they act, which
-moves your view there — but only when nothing is being composited for that tab:
-a window that is merely behind another app is left exactly where it is, and the
-click still lands. `chrome_scroll` does not move your view: scrolling falls
-back to a scripted scroll. `chrome_type` does not either, unless you set
-`submit` — the Enter it then presses is a key event, and keys need a visible tab.
+Everything else stays in the background too, input included. Clicks, keys,
+hover, drag, typing, wheel scrolling, snapshots, evaluations and screenshots all
+act on the agent's tab **without ever bringing it forward**, so you can keep
+watching a video in another tab while the agent works. No command activates a
+tab or focuses a window. A tab Chrome has discarded to save memory is reloaded
+first, because a discarded tab has no renderer to act on.
 
 ### Which tab a command acts on
 
@@ -146,31 +136,35 @@ command to the group the agent opened. It is **off by default**, because the who
 point of this plugin is driving the tabs you are already signed in to; with it on,
 a command naming one of your tabs is refused instead.
 
-### Why input needs a visible tab
+### How input reaches a background tab
 
-Chrome gives a tab that is not visible no focused frame and drops input before it
-reaches the page. Measured: `Control+a` on a background tab produced **zero**
-`keydown` events and left the selection empty; a main-frame click and a click on
-a frame ref each fired nothing on a background tab, while the same click fired on
-a visible one. There is no CDP flag that changes this, so `chrome_key`,
-`chrome_click`, `chrome_hover` and `chrome_drag` bring their tab forward first.
+Left alone, Chrome drops input to a tab it is not showing: a background-tab click
+fired nothing, `Control+a` produced zero `keydown` events, and the first mouse
+event stalled about five seconds. The extension turns on CDP's
+`Emulation.setFocusEmulationEnabled` when it attaches to a tab, which makes Chrome
+render that tab wherever it is — the page reports `visibilityState: visible` — and
+trusted input then lands. Measured (`test/probe-background-input.mjs`): click, key
+and wheel landed in 0–3ms in a background tab, in a collapsed tab group, and in a
+minimised window. A screencast alone still stalled 1.6s; a separate window alone
+stalled 5s in every state. A tab that still reports hidden is refused with an
+error rather than brought forward.
 
-Visible means the tab **and** its window. A tab stays active inside a window that
-is behind another app, and Chrome composites nothing for a window nobody is
-showing, so `document.visibilityState` reads `hidden` there too — and that case
-is not merely a dropped event: every mouse event stalls for about five seconds
-before it lands. Measured on one tab, same click: window behind another app,
-5007ms; window in front, 66ms. A key event skipped the stall entirely at 4ms,
-which points at the compositor's hit test rather than at input as a whole. Focus
-is not what input needs, though: with the window visible but behind another app
-the click landed in 331ms without the window ever being focused, so focus is
-taken only when the page reports it is not visible.
+Two side effects of that rendering are handled in the extension:
 
-Text entry is unaffected, because `Input.insertText` takes a different path and
-works on a background tab; scrolling falls back to a scripted `window.scrollBy`,
-so it too stays in the background. A `chrome_type` with `submit` set is the
-exception: the Enter it presses is a key event, so that call brings the tab
-forward first.
+- **The first wheel after attaching is held** until Chrome next produces a frame,
+  and then lands on top of whatever the page did meanwhile — a later
+  `scrollIntoView` was overridden and the click that followed missed. So
+  `chrome_scroll` sends one wheel, follows it with a mouse move that applies it,
+  and reports the pixels that actually moved, or that nothing did. It never
+  re-sends: a held wheel plus a re-send scrolled 1800px for a 900px request.
+  (`test/probe-scroll-commit.mjs`)
+- **`Page.captureScreenshot` alternated** between succeeding and hanging for its
+  whole timeout on a background tab, so screenshots take the first frame of a
+  screencast instead: six of six arrived in 1.2–1.4s.
+  (`test/probe-capture-variants.mjs`)
+
+The cost is that the agent's tabs keep rendering in the background like a visible
+tab would: animations run and media plays.
 
 ## Security
 
