@@ -528,6 +528,14 @@ try {
   const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
 
+  // A snapshot lists 400 refs per frame; it used to stop there without saying so.
+  const many = await call('open', { url: 'https://example.com/?many', newTab: true });
+  await call('eval', { tabId: many.tabId, expression: '(function () { var html = ""; for (var i = 1; i <= 450; i++) html += "<button>b" + i + "</button>"; document.body.innerHTML = html; return "ok"; })()' });
+  const manySnap = await call('snapshot', { tabId: many.tabId });
+  const listed = (manySnap.snapshot.match(/^\[ref=\d+\]/gm) || []).length;
+  check('a snapshot past the cap lists 400 and says how many it left out', listed === 400 && /50 more interactive element\(s\) were not listed/.test(manySnap.snapshot), { listed, tail: manySnap.snapshot.slice(manySnap.snapshot.indexOf('…'), manySnap.snapshot.indexOf('…') + 160) });
+  await call('close', { tabId: many.tabId });
+
   // --- click accuracy: every case here clicked the wrong thing, or clicked at
   // (0,0), and still reported success before the pre-click hit test ---------
   console.log('');

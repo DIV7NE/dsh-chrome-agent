@@ -782,9 +782,11 @@ const SNAPSHOT_EXPRESSION = [
   '    var text = el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title")' + '\n' + '      || el.getAttribute("alt") || el.getAttribute("name") || el.value || el.innerText || "";',
   '    return String(text).replace(/\\s+/g, " ").trim().slice(0, 120);',
   '  }',
-  '  for (var i = 0; i < nodes.length && refs.length < 400; i++) {',
+  '  var unlisted = 0;',
+  '  for (var i = 0; i < nodes.length; i++) {',
   '    var el = nodes[i];',
   '    if (!visible(el)) continue;',
+  '    if (refs.length >= 400) { unlisted++; continue; }',
   '    refs.push(el);',
   '    var ref = refs.length;',
   '    var kind = el.getAttribute("role") || el.tagName.toLowerCase();',
@@ -800,7 +802,8 @@ const SNAPSHOT_EXPRESSION = [
   '    url: location.href,',
   '    title: document.title,',
   '    text: head,',
-  '    tree: lines.join("\\n")',
+  '    tree: lines.join("\\n"),',
+  '    unlisted: unlisted',
   '  });',
   '})()',
 ].join('\n');
@@ -1860,6 +1863,7 @@ const COMMANDS = {
     // frame going away must not cost the caller the whole snapshot, but it must
     // not vanish silently either: the keys are reported in the trailer.
     const unread = [];
+    let unlisted = 0;
     let url = '';
     let title = '';
     let text = '';
@@ -1891,6 +1895,7 @@ const COMMANDS = {
         unread.push(frame.key + ': ' + describe(error));
         continue;
       }
+      unlisted += Number(parsed.unlisted) || 0;
       if (isMain) {
         url = parsed.url;
         title = parsed.title;
@@ -1912,6 +1917,12 @@ const COMMANDS = {
       }
     }
     const notes = [];
+    // The cap used to cut the list off without a word, so a model looking for a
+    // button past the 400th concluded it did not exist.
+    if (unlisted > 0) {
+      notes.push(unlisted + ' more interactive element(s) were not listed (a snapshot lists 400 per frame) — '
+        + 'use chrome_find to locate one by its text');
+    }
     const skipped = flat.total - flat.frames.length;
     if (skipped > 0) notes.push(skipped + ' further frame(s) not read');
     if (unread.length > 0) {
