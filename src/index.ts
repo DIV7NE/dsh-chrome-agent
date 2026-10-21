@@ -223,6 +223,7 @@ export const BATCHABLE_TOOLS: ReadonlySet<string> = new Set([
   'chrome_drag',
   'chrome_scroll',
   'chrome_type',
+  'chrome_form_input',
   'chrome_key',
   'chrome_wait_for',
   'chrome_eval',
@@ -596,6 +597,59 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     }, exec) => {
       exec.signal.throwIfAborted()
       return bridge.call('type', args)
+    },
+  }))
+
+  register(defineTool({
+    name: 'chrome_form_input',
+    description:
+      'Set a form control that is not a text field: a checkbox or radio button (true/false), a <select> '
+      + '(an option\'s visible text or value; a list for a multi-select), or a date, time, month, week, colour, range '
+      + 'or number input (in the browser\'s format, e.g. 2026-10-21 for a date). A checkbox or radio is clicked with a '
+      + 'real click (its label when the box itself is hidden); a select\'s option is chosen directly, since a native '
+      + 'dropdown cannot be clicked. The field is read back, and the call fails rather than leaving it wrong. '
+      + 'For text, use chrome_type. Works on a background tab without moving the user\'s view.',
+    parameters: {
+      ref: { type: 'integer', description: 'Element ref from chrome_snapshot.' },
+      selector: { type: 'string', description: 'CSS selector, when no ref is known.' },
+      value: {
+        required: true,
+        description: 'true/false for a checkbox or radio; option text or value for a select (a list for a multi-select); the value for a date-like input.',
+        oneOf: [{ type: 'string' }, { type: 'boolean' }, { type: 'array', items: { type: 'string' } }],
+      },
+      frame: {
+        type: 'string',
+        description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
+      },
+      tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
+      ...DIALOG_PARAMETERS,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          set: { type: 'string', required: true, description: 'What was done, e.g. "checked" or "already checked".' },
+          value: { type: 'string', required: true, description: 'What the field shows now.' },
+          dialogs: DIALOGS_OUTPUT,
+        },
+      },
+      render: textRender<{ set: string; value: string; dialogs?: DialogReport[] }>(v =>
+        (v.set.startsWith('already ') ? 'No change needed: the field is ' + v.set + '.' : 'Set. The field now shows: ' + JSON.stringify(v.value) + '.')
+        + dialogNote(v),
+      ),
+    },
+    execute: async (args: {
+      ref?: number
+      selector?: string
+      value: string | boolean | string[]
+      frame?: string
+      tabId?: number
+      dialog?: string
+      promptText?: string
+    }, exec) => {
+      exec.signal.throwIfAborted()
+      return bridge.call('formInput', args)
     },
   }))
 

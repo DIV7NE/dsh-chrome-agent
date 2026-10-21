@@ -541,7 +541,7 @@ try {
   const hist = await call('open', { url: 'https://example.com/?h=1', newTab: true });
   let noHistory = null;
   try { await call('open', { url: 'back', tabId: hist.tabId }); } catch (error) { noHistory = String(error.message); }
-  check('back with no history is refused with Chrome\'s reason', noHistory !== null && /could not go back/.test(noHistory), noHistory);
+  check('back with no history is refused', noHistory !== null && /no previous page/.test(noHistory), noHistory);
   await call('open', { url: 'https://example.com/?h=2', tabId: hist.tabId });
   const wentBack = await call('open', { url: 'back', tabId: hist.tabId });
   const backHere = await call('eval', { tabId: hist.tabId, expression: 'location.search' });
@@ -553,6 +553,48 @@ try {
   const reloaded = await call('eval', { tabId: hist.tabId, expression: 'window.__beforeReload === true ? "same page" : "fresh page"' });
   check('reload loads the page again', JSON.parse(reloaded.result) === 'fresh page', reloaded);
   await call('close', { tabId: hist.tabId });
+
+  // chrome_form_input: one of every kind, each read back by the page itself.
+  const fi = await call('open', { url: 'https://example.com/?forms', newTab: true });
+  const formFixture = '<form data-bwignore onsubmit="return false">'
+    + '<input id="cb" type="checkbox" data-bwignore>'
+    + '<input id="cb2" type="checkbox" checked data-bwignore>'
+    + '<label id="hl"><input id="hcb" type="checkbox" style="display:none" data-bwignore> Accept terms</label>'
+    + '<input id="r1" type="radio" name="rg" checked data-bwignore><input id="r2" type="radio" name="rg" data-bwignore>'
+    + '<select id="sel"><option value="v1">One</option><option value="v2">Two</option></select>'
+    + '<select id="msel" multiple><option>A</option><option>B</option><option>C</option></select>'
+    + '<input id="d" type="date" data-bwignore><input id="rng" type="range" min="0" max="10" data-bwignore>'
+    + '<input id="txt" data-bwignore autocomplete="off"></form>';
+  await call('eval', { tabId: fi.tabId, expression: '(function () { document.body.innerHTML = ' + JSON.stringify(formFixture) + '; window.__changes = []; document.addEventListener("change", function (e) { window.__changes.push(e.target.id + (e.isTrusted ? ":trusted" : ":script")); }, true); return "ok"; })()' });
+  const changesOf = async () => JSON.parse((await call('eval', { tabId: fi.tabId, expression: 'window.__changes.splice(0)' })).result);
+  const pageValue = async expr => JSON.parse((await call('eval', { tabId: fi.tabId, expression: expr })).result);
+  const fiError = async params => { try { await call('formInput', { ...params, tabId: fi.tabId }); return null; } catch (error) { return String(error.message); } };
+
+  const ticked = await call('formInput', { selector: '#cb', value: true, tabId: fi.tabId });
+  check('a checkbox is ticked with a real click', ticked.value === 'checked' && await pageValue('document.getElementById("cb").checked') === true
+    && JSON.stringify(await changesOf()) === '["cb:trusted"]', ticked);
+  const already = await call('formInput', { selector: '#cb2', value: true, tabId: fi.tabId });
+  check('a box already in the asked state is left alone', /^already checked/.test(already.set) && (await changesOf()).length === 0, already);
+  const hidden = await call('formInput', { selector: '#hcb', value: true, tabId: fi.tabId });
+  check('a hidden checkbox is ticked through its label', hidden.value === 'checked' && await pageValue('document.getElementById("hcb").checked') === true, hidden);
+  await changesOf();
+  const radio = await call('formInput', { selector: '#r2', value: true, tabId: fi.tabId });
+  check('a radio button is chosen', radio.value === 'checked' && await pageValue('document.getElementById("r1").checked') === false, radio);
+  check('a radio button is not cleared directly', /choosing another one/.test(await fiError({ selector: '#r2', value: false })));
+  await changesOf();
+  const chosen = await call('formInput', { selector: '#sel', value: 'Two', tabId: fi.tabId });
+  check('a select option is chosen by its text', chosen.value === 'Two' && await pageValue('document.getElementById("sel").value') === 'v2'
+    && (await changesOf()).indexOf('sel:script') !== -1, chosen);
+  check('an unknown option is refused, listing the real ones', /no option matches "Three".*One \[v1\], Two \[v2\]/.test(await fiError({ selector: '#sel', value: 'Three' })));
+  const multi = await call('formInput', { selector: '#msel', value: ['A', 'C'], tabId: fi.tabId });
+  check('a multi-select takes a list', multi.value === 'A, C', multi);
+  const dated = await call('formInput', { selector: '#d', value: '2026-10-21', tabId: fi.tabId });
+  check('a date input is set and read back', dated.value === '2026-10-21' && await pageValue('document.getElementById("d").value') === '2026-10-21', dated);
+  check('a date in the wrong format is refused', /did not accept "tomorrow"/.test(await fiError({ selector: '#d', value: 'tomorrow' })));
+  const ranged = await call('formInput', { selector: '#rng', value: '7', tabId: fi.tabId });
+  check('a range input is set', ranged.value === '7', ranged);
+  check('a text field is sent to chrome_type', /use chrome_type/.test(await fiError({ selector: '#txt', value: 'x' })));
+  await call('close', { tabId: fi.tabId });
 
   // A snapshot lists 400 refs per frame; it used to stop there without saying so.
   const many = await call('open', { url: 'https://example.com/?many', newTab: true });

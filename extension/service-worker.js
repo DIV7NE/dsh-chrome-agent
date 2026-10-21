@@ -1130,6 +1130,94 @@ async function resolveVisiblePoint(tabId, params, prefix) {
 }
 
 /**
+ * Page-side, for chrome_form_input: find the field and say what kind it is, or
+ * (with `set`) choose a select's option or set a value-type input, then read
+ * the field back.
+ *
+ * The value goes in through the element prototype's native setter, not
+ * `el.value =`, so a framework that tracks the value on the element instance
+ * (React does) sees it change when the input and change events arrive.
+ *
+ * @param params - the command's ref / selector.
+ * @param set - absent to inspect; `{ value }` to set it.
+ */
+function formFieldExpression(params, set) {
+  const selector = typeof params.selector === 'string' ? params.selector : null;
+  const ref = typeof params.ref === 'number' ? params.ref : null;
+  return [
+    '(function () {',
+    '  var el = null;',
+    ref !== null ? '  el = (window.__dshChromeRefs || [])[' + String(ref - 1) + '];' : '',
+    selector !== null ? '  if (!el) el = document.querySelector(' + JSON.stringify(selector) + ');' : '',
+    '  if (!el || !el.isConnected) return { error: "gone" };',
+    '  var tag = el.tagName.toLowerCase();',
+    '  var type = String(el.getAttribute("type") || "").toLowerCase();',
+    '  var kind = tag === "select" ? "select"',
+    '    : tag === "input" && (type === "checkbox" || type === "radio") ? type',
+    '    : tag === "input" && /^(date|time|datetime-local|month|week|color|range|number)$/.test(type) ? "value"',
+    '    : tag === "input" || tag === "textarea" || el.isContentEditable ? "text" : "other";',
+    '  function shown() {',
+    '    if (kind === "select") return el.multiple',
+    '      ? Array.from(el.selectedOptions).map(function (o) { return o.text.trim(); }).join(", ")',
+    '      : (el.options[el.selectedIndex] ? el.options[el.selectedIndex].text.trim() : "");',
+    '    if (kind === "checkbox" || kind === "radio") return el.checked ? "checked" : "unchecked";',
+    '    return String(el.value);',
+    '  }',
+    set === undefined ? '  return { kind: kind, checked: !!el.checked, disabled: !!el.disabled, value: shown(), hasLabel: !!(el.labels && el.labels.length) };' : '',
+    '  var wanted = ' + JSON.stringify(set === undefined ? null : set.value) + ';',
+    '  if (el.disabled) return { error: "disabled" };',
+    '  if (kind === "select") {',
+    '    var opts = Array.from(el.options);',
+    '    var list = Array.isArray(wanted) ? wanted.map(String) : [String(wanted)];',
+    '    var pick = function (w) {',
+    '      return opts.find(function (o) { return o.value === w; })',
+    '        || opts.find(function (o) { return o.text.trim() === w; })',
+    '        || opts.find(function (o) { return o.text.trim().toLowerCase() === w.toLowerCase(); });',
+    '    };',
+    '    var chosen = list.map(pick);',
+    '    if (chosen.some(function (o) { return !o; })) {',
+    '      return { error: "nooption", options: opts.slice(0, 60).map(function (o) { return o.text.trim() + (o.value !== o.text.trim() ? " [" + o.value + "]" : ""); }) };',
+    '    }',
+    '    if (!el.multiple && chosen.length > 1) return { error: "single" };',
+    '    el.focus();',
+    '    if (el.multiple) opts.forEach(function (o) { o.selected = chosen.indexOf(o) !== -1; });',
+    '    else Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, chosen[0].value);',
+    '  } else if (kind === "value") {',
+    '    el.focus();',
+    '    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, String(wanted));',
+    '    if (String(el.value) !== String(wanted)) { var got = String(el.value); el.blur(); return { error: "rejected", value: got }; }',
+    '  } else {',
+    '    return { error: "kind", kind: kind };',
+    '  }',
+    '  el.dispatchEvent(new Event("input", { bubbles: true }));',
+    '  el.dispatchEvent(new Event("change", { bubbles: true }));',
+    '  el.blur();',
+    '  return { kind: kind, value: shown() };',
+    '})()',
+  ].join('\n');
+}
+
+/**
+ * Page-side: the ref or selector target's first <label>, marked so a click can
+ * find it. A styled checkbox is often hidden behind its label, and clicking the
+ * label is what a user does.
+ */
+function labelMarkExpression(params, mark) {
+  const selector = typeof params.selector === 'string' ? params.selector : null;
+  const ref = typeof params.ref === 'number' ? params.ref : null;
+  return [
+    '(function () {',
+    '  var el = null;',
+    ref !== null ? '  el = (window.__dshChromeRefs || [])[' + String(ref - 1) + '];' : '',
+    selector !== null ? '  if (!el) el = document.querySelector(' + JSON.stringify(selector) + ');' : '',
+    '  if (!el || !el.labels || !el.labels.length) return false;',
+    '  el.labels[0].setAttribute("data-dsh-label", ' + JSON.stringify(mark) + ');',
+    '  return true;',
+    '})()',
+  ].join('\n');
+}
+
+/**
  * Page-side: the field chrome_type works on — the ref or selector target, else
  * whatever has focus — whether focus is in it, and what it holds now.
  *
@@ -2315,6 +2403,68 @@ const COMMANDS = {
     }
   },
 
+  /**
+   * Set a checkbox, radio button, select, or date/time/number/colour/range
+   * input. A checkbox or radio is clicked with a real click (its label, when the
+   * box itself is hidden), since that is what a page expects; a select's
+   * native list cannot be clicked through CDP, so its option is set and
+   * announced the way a choice would be. Every path reads the field back.
+   */
+  async formInput(params) {
+    const tabId = await resolveTabId(params.tabId);
+    const frameKey = normaliseFrameKey(params.frame);
+    if (typeof params.ref !== 'number' && typeof params.selector !== 'string') {
+      throw new Error('chrome_form_input needs a ref or selector for the field');
+    }
+    const field = await evaluateInFrame(tabId, frameKey, formFieldExpression(params));
+    if (!field || field.error === 'gone') {
+      throw new Error('that field is no longer on the page — take a fresh chrome_snapshot');
+    }
+    if (field.kind === 'text') throw new Error('that is a text field — use chrome_type, which types into it with real keystrokes');
+    if (field.kind === 'other') throw new Error('that element is not a form field this can set — click it with chrome_click');
+    if (field.disabled) throw new Error('that field is disabled');
+    if (field.kind === 'checkbox' || field.kind === 'radio') {
+      const value = params.value;
+      const want = value === true || value === 'true' || value === 'checked' || value === 'on';
+      if (!want && value !== false && value !== 'false' && value !== 'unchecked' && value !== 'off') {
+        throw new Error('a ' + field.kind + ' takes true or false');
+      }
+      if (field.checked === want) return { set: 'already ' + field.value, value: field.value };
+      if (field.kind === 'radio' && !want) {
+        throw new Error('a radio button is cleared by choosing another one in its group, not directly');
+      }
+      try {
+        await COMMANDS.click({ ref: params.ref, selector: params.selector, frame: params.frame, tabId: tabId });
+      } catch (error) {
+        // A styled box is often hidden behind its label; a user clicks the label.
+        if (!field.hasLabel || !/no visible size|covered by/.test(describe(error))) throw error;
+        const mark = 'l' + Date.now();
+        await evaluateInFrame(tabId, frameKey, labelMarkExpression(params, mark));
+        await COMMANDS.click({ selector: '[data-dsh-label="' + mark + '"]', frame: params.frame, tabId: tabId });
+      }
+      const after = await evaluateInFrame(tabId, frameKey, formFieldExpression(params));
+      if (!after || after.checked !== want) {
+        throw new Error('clicking it did not change it — it is still ' + (after ? after.value : 'unknown')
+          + '; the page may control this box some other way');
+      }
+      return { set: after.value, value: after.value };
+    }
+    const result = await evaluateInFrame(tabId, frameKey, formFieldExpression(params, { value: params.value }));
+    if (!result || result.error) {
+      const error = result ? result.error : 'unknown';
+      if (error === 'nooption') {
+        throw new Error('no option matches ' + JSON.stringify(params.value) + '; the options are: ' + result.options.join(', '));
+      }
+      if (error === 'single') throw new Error('that select takes one option, not a list');
+      if (error === 'rejected') {
+        throw new Error('the field did not accept ' + JSON.stringify(params.value) + ' (it now reads '
+          + JSON.stringify(result.value) + ') — check the format, e.g. 2026-10-21 for a date');
+      }
+      throw new Error('could not set that field (' + error + ')');
+    }
+    return { set: result.value, value: result.value };
+  },
+
   async key(params) {
     const tabId = await resolveTabId(params.tabId);
     const chords = parseKeySequence(params.key, params.repeat);
@@ -2453,7 +2603,7 @@ async function restoreViewAfterDialogs(dialogs, tabsBefore) {
 }
 
 /** The commands whose result carries the dialogs answered meanwhile. */
-const DIALOG_COMMANDS = new Set(['click', 'key', 'type', 'eval', 'open', 'close']);
+const DIALOG_COMMANDS = new Set(['click', 'key', 'type', 'formInput', 'eval', 'open', 'close']);
 
 /** Dispatch one command by name. */
 async function runCommand(method, params) {
