@@ -9,7 +9,7 @@ A DeepSeek Harness (DSH) plugin that lets the DSH agent drive the user's real, l
 - **Host half** (`src/index.ts`, bundled to `lib/index.js`): a DSH plugin that claims the `/chrome-agent/bridge` upgrade route on DSH's web server, registers the `chrome_*` model tools via `defineTool` from `@deepseek-ai/dsh-tools`, and forwards each call to the extension.
 - **Extension half** (`extension/`): a plain-JS MV3 extension. `service-worker.js` dials `ws://127.0.0.1:<port>/chrome-agent/bridge` (port from the options page, default 3080) and executes commands through `chrome.debugger` (CDP). It has **no build step**; Chrome loads `extension/` as it sits on disk.
 
-README.md explains the design rationale (why not a second profile or a debugging port) and the user-facing behaviour in detail. Its tool table lists only some of the tools; the `name: 'chrome_…'` entries in `src/index.ts` are the full list.
+README.md explains the design rationale (why not a second profile or a debugging port) and the user-facing behaviour in detail, with one row per tool; the `name: 'chrome_…'` entries in `src/index.ts` are the authority, so keep the table in step when adding one.
 
 ## Commands
 

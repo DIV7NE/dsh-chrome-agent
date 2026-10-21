@@ -83,13 +83,26 @@ to pay the one-time Chrome Web Store fee.
 |---|---|
 | `chrome_status` | Is the extension connected, and which build. |
 | `chrome_tabs` | Every open tab: id, title, url, which is active, and whether it is the agent's own (`agent: true|false`). |
-| `chrome_open` | Navigate a tab, or open a new one. |
-| `chrome_snapshot` | The page as a text tree of interactive elements, each with `[ref=N]`. |
-| `chrome_click` | Click by `ref`, CSS selector, or coordinates, with trusted mouse events. |
+| `chrome_open` | Navigate a tab or open a new one; `back`, `forward` and `reload` move it through its history. |
+| `chrome_close` | Close a tab. |
+| `chrome_snapshot` | The page as a text tree of interactive elements, each with `[ref=N]`; says when it left elements out. |
+| `chrome_find` | Find text on the page (frames included) and scroll the first hit into view. |
+| `chrome_page_text` | The page's readable text, article first. |
+| `chrome_click` | Click by `ref`, CSS selector, or coordinates with trusted mouse events, after checking what is under the point; right, middle, double and triple clicks; held `modifiers`. |
 | `chrome_type` | Click into a field with a real click, type, and read back what the field now holds (a password reports only its length); optional Enter. |
-| `chrome_key` | One key or chord, e.g. `Enter`, `PageDown`, `Control+a`. |
-| `chrome_eval` | Evaluate JavaScript in the page. |
+| `chrome_form_input` | Set a checkbox, radio, select, or date/time/number/colour/range input, and read it back. |
+| `chrome_key` | A key or chord, or several in order (`Tab Tab Enter`), with `repeat`. |
+| `chrome_hover` | Move the pointer over an element without clicking. |
+| `chrome_drag` | Drag between two elements or points with intermediate mouse moves. |
+| `chrome_scroll` | Scroll an element into view, or scroll by a delta with a real wheel and report how far it moved. |
+| `chrome_wait_for` | Wait until a JavaScript expression is truthy. |
+| `chrome_eval` | Evaluate JavaScript in the page; a promise is awaited. |
 | `chrome_screenshot` | The visible area, saved to a path: PNG, or JPEG when the capture is large enough to need re-encoding. The result reports which format it encoded. |
+| `chrome_console` | The page's console messages. |
+| `chrome_network` | The page's network requests. |
+| `chrome_resize` | Lay the page out at another viewport size, without moving the user's window. |
+| `chrome_upload` | Attach local files to a file input. |
+| `chrome_batch` | Run several of the above in one call. |
 
 The loop is the same one every browser agent uses: `chrome_snapshot`, then act on
 a ref. **A ref is only valid until the next snapshot** — the page re-numbers them.
