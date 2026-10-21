@@ -240,12 +240,16 @@ extension is what dials out, so that is where the address belongs.
 - **A password manager's autofill menu locks the agent out of that tab.** When the
   agent focuses a login-style field, a password manager such as Bitwarden injects
   its own frame into the page, and Chrome then refuses every debugger command to
-  the whole tab — input, capture and reads alike — until focus leaves the field.
-  The extension takes focus off the field through `chrome.scripting` (which is
-  not locked), waits for the tab to come back, and retries the refused command;
-  `chrome_type` fills such a field by script instead of keystrokes and says so in
-  its result. (That recovery is built but not yet verified live with a password
-  manager switched on.) To avoid the lock altogether, set the password manager's
+  the whole tab — input, capture and reads alike. Left alone, Bitwarden's menu
+  held a tab for 20s and more. The extension gets the tab back through
+  `chrome.scripting`, which is not locked: first a focus change, which lets the
+  password manager close the menu itself; if the menu stays, its injected
+  elements (direct children of `<body>`/`<html>` with a custom tag the page never
+  defined) are removed. Then the refused command is sent again — except real
+  input and the model's own `chrome_eval` code when they were interrupted rather
+  than refused, which are reported instead. `chrome_type` fills a field whose
+  focus keeps locking the tab by script, and says so in its result. Verified with
+  Bitwarden switched on. To avoid the lock altogether, set the password manager's
   site access to "On click" in `chrome://extensions`, or turn off its inline
   autofill menu.
 - **Background tabs answer at about a frame per second.** Anything that waits for

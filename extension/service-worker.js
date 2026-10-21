@@ -250,15 +250,47 @@ async function resolveTabId(tabId) {
  * after every command would flash Chrome's debugging banner on and off, so
  * attachments are held until the tab closes or the debugger drops them.
  */
+/** Attaches in flight, so callers that race for one tab share a single attach. */
+const attaching = new Map();
+
+/**
+ * Attach to a tab once, however many callers ask at the same moment. Two
+ * overlapping chrome.debugger.attach calls for one tab can fail the second as
+ * "another debugger", which recovery from a locked tab made likely: its loop,
+ * a retried command and the next command can all re-attach together.
+ */
 async function ensureAttached(tabId) {
   if (attached.has(tabId)) return;
+  if (attaching.has(tabId)) return attaching.get(tabId);
+  const attempt = attachTab(tabId);
+  attaching.set(tabId, attempt);
+  try {
+    await attempt;
+  } finally {
+    attaching.delete(tabId);
+  }
+}
+
+async function attachTab(tabId) {
   const target = { tabId: tabId };
   try {
     await chrome.debugger.attach(target, '1.3');
   } catch (error) {
     const message = describe(error);
     if (/another debugger/i.test(message)) {
-      throw new Error('another debugger (DevTools or another extension) already holds tab ' + tabId);
+      // Chrome also says "Another debugger is already attached" when the
+      // attachment it means is this extension's own — seen intermittently while
+      // recovering a locked tab. If a command goes through, it is ours.
+      let ours = false;
+      try {
+        await chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: '1' });
+        ours = true;
+      } catch (probeError) {
+        // Locked by another extension's frame: let cdp() recover it.
+        if (/URL of different extension/.test(describe(probeError))) throw probeError;
+        ours = false;
+      }
+      if (!ours) throw new Error('another debugger (DevTools or another extension) already holds tab ' + tabId);
     }
     // Our own attachment survives a service-worker restart while this Set does
     // not, so 'already attached' is success, not failure. The match must be
@@ -430,12 +462,18 @@ chrome.tabs.onRemoved.addListener(tabId => {
 });
 
 /** Send one CDP command on a tab. */
-async function cdpOnce(tabId, method, params) {
+async function cdpOnce(tabId, method, params, reattached) {
   const started = Date.now();
   try {
     await ensureAttached(tabId);
     return await chrome.debugger.sendCommand({ tabId: tabId }, method, params || {});
   } catch (error) {
+    // Chrome dropped the attachment before onDetach told us: the command never
+    // ran, so attach again and send it once more.
+    if (!reattached && /Debugger is not attached/i.test(describe(error))) {
+      attached.delete(tabId);
+      return cdpOnce(tabId, method, params, true);
+    }
     // Chrome's own text ("Detached while handling command.") says neither which
     // call failed nor after how long; one click makes eight calls.
     const which = method + (params && typeof params.type === 'string' ? '(' + params.type + ')' : '');
@@ -451,17 +489,20 @@ async function cdpOnce(tabId, method, params) {
  *
  * Chrome refuses a command to such a tab before running it, so after the frame
  * is released the same command is sent once more. "Detached while handling
- * command" is how the lock often begins, but by then the command may already
- * have run, so it is released and reported, never repeated here.
+ * command" is how the lock often begins, and by then the command may already
+ * have run: it is sent again only when running it twice is harmless — not real
+ * input, and not the model's own chrome_eval code (`userCode`), which is
+ * reported so the model can decide.
  */
-async function cdp(tabId, method, params) {
+async function cdp(tabId, method, params, options) {
   try {
     return await cdpOnce(tabId, method, params);
   } catch (error) {
     if (!error.refusedForForeignFrame && !error.interrupted) throw error;
     const released = await releaseForeignFrame(tabId);
-    if (!released) throw new Error(error.message + FOREIGN_FRAME_NOTE + ', and it could not be cleared');
-    if (error.interrupted) {
+    if (!released.ok) throw new Error(error.message + FOREIGN_FRAME_NOTE + ', and it could not be cleared: ' + released.why);
+    const unsafeTwice = method.startsWith('Input.') || (options && options.userCode === true);
+    if (error.interrupted && unsafeTwice) {
       throw new Error(error.message + FOREIGN_FRAME_NOTE + '; it has been cleared, so repeat the action');
     }
     return cdpOnce(tabId, method, params);
@@ -472,42 +513,93 @@ async function cdp(tabId, method, params) {
 const releasedAt = new Map();
 
 /**
- * Take focus off whatever field brought another extension's frame into a tab,
- * then wait until the debugger can use the tab again.
+ * Get a tab back from another extension's frame, then wait until the debugger
+ * can use it again. chrome.scripting is not locked, so both stages go through it.
  *
- * Measured with Bitwarden (test/probe-foreign-frame.mjs): its autofill menu is
- * injected while a login-style field has focus, sits in a closed shadow root,
- * and locks every debugger command out of the tab — Escape and clicks included.
- * chrome.scripting is not locked, and blurring the field through it made the
- * menu go away and a fresh attach work again.
+ * Measured with Bitwarden (test/probe-foreign-frame.mjs, probe-bitwarden-bar.mjs):
+ * its autofill menu is injected as two randomly named custom elements under
+ * <body>, each hiding its frame in a closed shadow root, and it locks every
+ * debugger command out of the tab — Escape and clicks included. Its own code
+ * force-closes the menu only on a window focusout while document.hasFocus() is
+ * false, or on the page turning hidden, and focus emulation suppresses both.
+ *
+ * First, gently: a focus change, which let Bitwarden close the menu itself when
+ * a field had just been focused (cleared in 0.13s). When the menu stays — it did
+ * after a confirm() on a page that had a password typed into it, even with the
+ * page hidden for over a second — the injected elements are removed: direct
+ * children of <html> or <body> whose custom tag the page never defined, since an
+ * extension defines its elements in its own isolated world. That gave the
+ * debugger the tab back within 100ms and left the page's own content alone.
  */
 async function releaseForeignFrame(tabId) {
+  // What takes the password manager's frame down is a focus change. With focus
+  // on <body> (measured after a confirm() closed) there is nothing to blur, so
+  // a throwaway button off-screen takes focus and gives it up — a button, not an
+  // input, because focusing an input is what brings an autofill menu in. Only
+  // the top page gets the decoy: one inside an iframe would pull the page's
+  // focus into that frame instead of producing the change.
   const blur = () => {
     const active = document.activeElement;
-    if (active && active !== document.body && typeof active.blur === 'function') active.blur();
-  };
-  try {
-    await chrome.scripting.executeScript({ target: { tabId: tabId, allFrames: true }, func: blur });
-  } catch (error) {
-    // A frame the extension cannot script must not stop the blur where it can.
-    try {
-      await chrome.scripting.executeScript({ target: { tabId: tabId }, func: blur });
-    } catch (mainError) {
-      return false;
+    if (active && active !== document.body && active.tagName !== 'IFRAME' && typeof active.blur === 'function') {
+      active.blur();
+      return;
     }
-  }
-  for (const started = Date.now(); Date.now() - started < 3000; ) {
+    if (window !== window.top) return;
+    const decoy = document.createElement('button');
+    decoy.tabIndex = -1;
+    decoy.setAttribute('aria-hidden', 'true');
+    decoy.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+    document.documentElement.appendChild(decoy);
+    decoy.focus({ preventScroll: true });
+    decoy.blur();
+    decoy.remove();
+  };
+  const blurAll = async () => {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tabId, allFrames: true }, func: blur });
+    } catch (error) {
+      // A frame the extension cannot script must not stop the blur where it can.
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, func: blur });
+    }
+  };
+  const removeInjected = () => {
+    for (const parent of [document.documentElement, document.body]) {
+      if (!parent) continue;
+      for (const el of Array.from(parent.children)) {
+        const tag = el.tagName.toLowerCase();
+        if (tag.includes('-') && !customElements.get(tag)) el.remove();
+      }
+    }
+  };
+  let last = '';
+  let blurredAt = 0;
+  let removedAt = 0;
+  const started = Date.now();
+  while (Date.now() - started < 4000) {
+    try {
+      if (blurredAt === 0) {
+        await blurAll();
+        blurredAt = Date.now();
+      } else if (Date.now() - started >= 1000 && Date.now() - removedAt >= 1000) {
+        // Main world: customElements there is the page's registry, not ours.
+        await chrome.scripting.executeScript({ target: { tabId: tabId }, world: 'MAIN', func: removeInjected });
+        removedAt = Date.now();
+      }
+    } catch (error) {
+      return { ok: false, why: 'the page could not be scripted (' + describe(error) + ')' };
+    }
     try {
       await ensureAttached(tabId);
       await chrome.debugger.sendCommand({ tabId: tabId }, 'Runtime.evaluate', { expression: '1' });
       releasedAt.set(tabId, Date.now());
-      return true;
+      return { ok: true, why: '' };
     } catch (error) {
+      last = describe(error);
       attached.delete(tabId);
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
-  return false;
+  return { ok: false, why: 'the tab was still locked 4s later, after taking focus off the field and removing the injected elements (' + last + ')' };
 }
 
 /**
@@ -524,14 +616,15 @@ const FOREIGN_FRAME_NOTE = ' — another extension (often a password manager\'s 
 /**
  * Evaluate an expression in the page and return its JSON value. `userGesture`
  * is set so pages that gate behaviour behind a real interaction still work.
+ * `options.userCode` marks the model's own code, which cdp() never runs twice.
  */
-async function evaluate(tabId, expression) {
+async function evaluate(tabId, expression, options) {
   const result = await cdp(tabId, 'Runtime.evaluate', {
     expression: expression,
     returnByValue: true,
     awaitPromise: true,
     userGesture: true,
-  });
+  }, options);
   if (result && result.exceptionDetails) {
     const details = result.exceptionDetails;
     const thrown = details.exception && (details.exception.description || details.exception.value);
@@ -1406,7 +1499,6 @@ async function ensureLive(tabId) {
  * not the agent's to take, and input sent anyway would be lost.
  */
 async function ensureInputReady(tabId) {
-  await ensureAttached(tabId);
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (await evaluate(tabId, 'document.visibilityState === "visible"')) return;
     if (attempt === 4) await cdp(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
@@ -1490,7 +1582,6 @@ async function captureOnce(tabId, options) {
  * 1.2-1.4s.
  */
 async function screencastFrame(tabId, options) {
-  await ensureAttached(tabId);
   let listener = null;
   const frame = new Promise(resolve => {
     listener = (source, method, event) => {
@@ -2167,7 +2258,7 @@ const COMMANDS = {
       '  } catch (error) { return "Error: " + (error && error.message); }',
       '})()',
     ].join('\n');
-    const result = await evaluate(tabId, wrapped);
+    const result = await evaluate(tabId, wrapped, { userCode: true });
     return { result: String(result) };
   },
 

@@ -59,7 +59,22 @@ let lastCall = null;
 /** Every tab this run opened, closed at the end even when the run aborts. */
 const openedTabs = new Set();
 
-function call(method, params, timeoutMs) {
+/**
+ * Send one command. When another extension's frame interrupted it and the
+ * extension cleared the frame, it asks for the action to be repeated — what
+ * the model is told to do — so the harness repeats it once.
+ */
+async function call(method, params, timeoutMs) {
+  try {
+    return await callOnce(method, params, timeoutMs);
+  } catch (error) {
+    if (!/so repeat the action/.test(String(error.message))) throw error;
+    console.log('        (repeated ' + method + ' after the extension cleared another extension\'s frame)');
+    return callOnce(method, params, timeoutMs);
+  }
+}
+
+function callOnce(method, params, timeoutMs) {
   if (!socket) return Promise.reject(new Error('no extension connected'));
   lastCall = { method, params };
   const id = ++nextId;
