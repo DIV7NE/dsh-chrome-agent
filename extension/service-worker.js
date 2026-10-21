@@ -29,7 +29,7 @@ const keyCodeFor = PURE.keyCodeFor;
 const parseKeySequence = PURE.parseKeySequence;
 const modifierMask = PURE.modifierMask;
 
-const DEFAULT_PORT = 3080;
+const DEFAULT_PORT = 19387;
 const PROTOCOL_VERSION = 1;
 const RECONNECT_ALARM = 'dsh-chrome-agent-reconnect';
 

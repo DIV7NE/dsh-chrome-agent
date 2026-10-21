@@ -124,7 +124,7 @@ reviewer needs the server running. Paste this into "Test instructions":
 ```
 This extension is a client half. It dials a WebSocket to a local server (the
 open-source DeepSeek Harness, "DSH") on 127.0.0.1, at the port set on its
-options page (3080 by default). It cannot function
+options page (19387 by default). It cannot function
 without that local server, and it has no developer-run backend.
 
 To verify it works end to end:
@@ -134,8 +134,8 @@ To verify it works end to end:
        npm run pack:plugin
    Then install the packed dsh-chrome-agent tarball in the DeepSeek Harness
    app and restart it.
-2. Load this extension. Open its Options page and set the port to the one the
-   DeepSeek Harness app's local server listens on.
+2. Load this extension. Its Options page should show port 19387, where the
+   plugin listens.
 3. In DeepSeek Harness, ask the agent to run the tool named chrome_status.
    It should report the extension connected, with the same extension id shown
    on the Options page.

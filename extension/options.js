@@ -1,5 +1,5 @@
 /** Options page: the DSH server port, and a manual reconnect. */
-const DEFAULT_PORT = 3080;
+const DEFAULT_PORT = 19387;
 
 const portInput = document.getElementById('port');
 const stateBox = document.getElementById('state');

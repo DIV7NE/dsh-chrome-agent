@@ -28,11 +28,19 @@ import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { WebSocketServer, type WebSocket } from 'ws'
 
-/** Services required before the route and the tools can be claimed. */
-export const inject = ['webServer', 'tools']
+/** Services required before the tools can be claimed. */
+export const inject = ['tools']
 
 /** The one route this plugin owns. */
 const ROUTE = '/chrome-agent/bridge'
+
+/**
+ * The fixed loopback port the bridge listens on, and the extension's default.
+ * The DeepSeek Harness app starts its web server with `--port 0`, so its port
+ * changes every launch and the extension could never find a route on it; the
+ * plugin owns this listener instead.
+ */
+export const BRIDGE_PORT = 19387
 
 /** Default per-command timeout (the extension answers or the call fails). */
 const CALL_TIMEOUT_MS = 30_000
@@ -93,6 +101,8 @@ export class Bridge {
   private socket: WebSocket | undefined
   private version = ''
   private seq = 0
+  /** Why the bridge listener is down (e.g. its port is taken), empty while it listens. */
+  listenError = ''
   private readonly pending = new Map<number, Pending>()
 
   /** Adopt a freshly accepted socket, dropping any previous one. */
@@ -155,8 +165,9 @@ export class Bridge {
   call<T = unknown>(method: string, params: unknown = {}, timeoutMs: number = CALL_TIMEOUT_MS): Promise<T> {
     const socket = this.socket
     if (socket === undefined || socket.readyState !== 1) {
-      return Promise.reject(new Error(
-        'the companion Chrome extension is not connected — load extension/ unpacked in chrome://extensions (Developer mode) and make sure the DSH server is running',
+      return Promise.reject(new Error(this.listenError !== ''
+        ? 'the chrome-agent bridge is not listening: ' + this.listenError
+        : 'the companion Chrome extension is not connected — load extension/ unpacked in chrome://extensions (Developer mode) with its port set to ' + BRIDGE_PORT,
       ))
     }
     const id = ++this.seq
@@ -189,12 +200,29 @@ export class Bridge {
   }
 }
 
-/** Structural face of the host webserver service. */
-export interface WebServerLike {
-  registerUpgrade(route: {
-    path: string
-    handler: (req: IncomingMessage, socket: unknown, head: Buffer) => void
-  }): () => void
+/**
+ * Listen for the extension on 127.0.0.1:`port` at the bridge route. Only the
+ * pinned Origin may upgrade; anything else gets 403. A listen failure (port in
+ * use) is recorded on the bridge instead of crashing the host.
+ * @param bridge - the bridge that adopts accepted sockets.
+ * @param port - the loopback port, 0 for any free one.
+ * @returns the server; close it (and its clients) to release the port.
+ */
+export function listenBridge(bridge: Bridge, port: number): WebSocketServer {
+  const wss = new WebSocketServer({
+    host: '127.0.0.1',
+    port,
+    path: ROUTE,
+    verifyClient: (info: { req: IncomingMessage }, done: (ok: boolean, code?: number) => void) => {
+      done(isTrustedBridgeRequest(info.req.headers), 403)
+    },
+  })
+  wss.on('listening', () => { bridge.listenError = '' })
+  wss.on('error', (error: Error) => {
+    bridge.listenError = 'could not listen on 127.0.0.1:' + port + ' (' + error.message + '); another program or a second DSH may hold the port'
+  })
+  wss.on('connection', (ws: WebSocket) => { bridge.attach(ws) })
+  return wss
 }
 
 /** Structural face of the host tool registry. */
@@ -204,7 +232,6 @@ export interface ToolsLike {
 
 /** Structural face of the host context. */
 export interface HostContext {
-  webServer: WebServerLike
   tools: ToolsLike
   effect(callback: () => void | (() => void), label?: string): void
 }
@@ -381,18 +408,22 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
           connected: { type: 'boolean', required: true },
           version: { type: 'string', required: true, description: 'Extension version, empty when not connected.' },
           extensionId: { type: 'string', required: true },
+          listenError: { type: 'string', required: true, description: 'Why the bridge is not listening, empty when it is.' },
         },
       },
-      render: textRender<{ connected: boolean; version: string; extensionId: string }>(value =>
+      render: textRender<{ connected: boolean; version: string; extensionId: string; listenError: string }>(value =>
         value.connected
           ? 'Chrome extension connected (version ' + (value.version === '' ? 'unknown' : value.version) + ', id ' + value.extensionId + ').'
-          : 'Chrome extension NOT connected (expected id ' + value.extensionId + '). Ask the user to load extension/ unpacked in chrome://extensions with Developer mode on, then retry.',
+          : value.listenError !== ''
+            ? 'Chrome extension NOT connected: the bridge ' + value.listenError + '. Ask the user to free that port, then restart DeepSeek Harness.'
+            : 'Chrome extension NOT connected (expected id ' + value.extensionId + '). Ask the user to load extension/ unpacked in chrome://extensions with Developer mode on and its port set to ' + BRIDGE_PORT + ', then retry.',
       ),
     },
     execute: async () => ({
       connected: bridge.connected(),
       version: bridge.extensionVersion(),
       extensionId: EXTENSION_ID,
+      listenError: bridge.listenError,
     }),
   }))
 
@@ -1173,36 +1204,20 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
 }
 
 /**
- * Host plugin body: claim the bridge route and register the browser tools.
- * @param ctx - the host context (webserver, tools).
+ * Host plugin body: open the bridge listener and register the browser tools.
+ * @param ctx - the host context (tools).
  */
 export function apply(ctx: HostContext): void {
   const bridge = new Bridge()
 
   ctx.effect(() => {
-    const wss = new WebSocketServer({ noServer: true })
-
-    wss.on('connection', (ws: WebSocket) => { bridge.attach(ws) })
-
-    const disposeRoute = ctx.webServer.registerUpgrade({
-      path: ROUTE,
-      handler: (req, socket, head) => {
-        if (!isTrustedBridgeRequest(req.headers)) {
-          const raw = socket as { write?: (text: string) => void; destroy?: () => void }
-          raw.write?.('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
-          raw.destroy?.()
-          return
-        }
-        wss.handleUpgrade(req, socket as never, head, ws => { wss.emit('connection', ws, req) })
-      },
-    })
-
+    const wss = listenBridge(bridge, BRIDGE_PORT)
     return () => {
-      disposeRoute()
       bridge.dispose()
+      for (const client of wss.clients) client.terminate()
       wss.close()
     }
-  }, 'dsh-chrome-agent: bridge route')
+  }, 'dsh-chrome-agent: bridge listener')
 
   registerTools(ctx, bridge)
 }

@@ -44,8 +44,9 @@ itself, so the `dsh` CLI cannot install into it.
 1. Open `chrome://extensions`
 2. Turn on **Developer mode** (top right)
 3. **Load unpacked** → select this package's `extension/` folder
-4. Open the extension's **Options** and set the port DeepSeek Harness's local
-   server listens on (the extension's default is `3080`)
+4. Open the extension's **Options** and check the port is `19387`, the default.
+   The plugin opens its own loopback listener on that port, because DeepSeek
+   Harness gives its own web server a new random port on every launch
 
 Chrome shows *"DSH Chrome Agent started debugging this browser"* while the agent
 holds an attachment. That banner is Chrome's, and it is the honest signal that
@@ -217,11 +218,11 @@ the authentication precisely because the socket is not reachable from anywhere
 else. To drive a Chrome on another machine, forward the port over SSH:
 
 ```bash
-ssh -N -L 3080:127.0.0.1:3080 user@the-other-machine
+ssh -N -L 19387:127.0.0.1:19387 user@the-other-machine
 ```
 
 DSH, the extension and its options port all then live on the same machine as
-before: the extension still dials `127.0.0.1:3080`, and neither it nor the options
+before: the extension still dials `127.0.0.1:19387`, and neither it nor the options
 page knows the tunnel exists.
 
 ## Configuration
@@ -231,8 +232,9 @@ page knows the tunnel exists.
   name: 'dsh-chrome-agent'
 ```
 
-The extension's port lives in its own options page, not in this file — the
-extension is what dials out, so that is where the address belongs.
+The bridge always listens on `127.0.0.1:19387` (`BRIDGE_PORT` in
+`src/index.ts`), and the extension's options page holds the port it dials,
+19387 by default. If another program holds that port, `chrome_status` says so.
 
 ## Known limitations
 

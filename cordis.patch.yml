@@ -3,7 +3,7 @@
 # Installed through the DeepSeek Harness app, from the tarball `npm run
 # pack:plugin` builds; the app manages its profile itself.
 #
-# The plugin claims the /chrome-agent/bridge WebSocket route. Nothing else is
+# The plugin listens on ws://127.0.0.1:19387/chrome-agent/bridge. Nothing else is
 # required from the profile: the companion Chrome extension is loaded by hand
 # (chrome://extensions -> Load unpacked -> this package's extension/ folder).
 

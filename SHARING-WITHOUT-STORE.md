@@ -25,7 +25,7 @@ unpacked install is a first-class install here, not a degraded one.
 2. Open `chrome://extensions`.
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the `extension/` folder.
-5. Open the extension's **Options** and confirm the DSH port (default `3080`).
+5. Open the extension's **Options** and confirm the port is `19387` (the default).
 
 That is the whole install. The extension appears in the toolbar with the
 DeepSeek whale icon, and reports "Connected" once the local DSH server is

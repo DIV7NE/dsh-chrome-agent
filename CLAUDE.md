@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A DeepSeek Harness (DSH) plugin that lets the DSH agent drive the user's real, logged-in Chrome. It has two halves that talk over one WebSocket:
 
-- **Host half** (`src/index.ts`, bundled to `lib/index.js`): a DSH plugin that claims the `/chrome-agent/bridge` upgrade route on DSH's web server, registers the `chrome_*` model tools via `defineTool` from `@deepseek-ai/dsh-tools`, and forwards each call to the extension.
-- **Extension half** (`extension/`): a plain-JS MV3 extension. `service-worker.js` dials `ws://127.0.0.1:<port>/chrome-agent/bridge` (port from the options page, default 3080) and executes commands through `chrome.debugger` (CDP). It has **no build step**; Chrome loads `extension/` as it sits on disk.
+- **Host half** (`src/index.ts`, bundled to `lib/index.js`): a DSH plugin that opens its own WebSocket listener on `127.0.0.1:19387` at `/chrome-agent/bridge` (`BRIDGE_PORT`, `listenBridge`; the desktop app starts its web server with `--port 0`, so a route there could never be found), registers the `chrome_*` model tools via `defineTool` from `@deepseek-ai/dsh-tools`, and forwards each call to the extension.
+- **Extension half** (`extension/`): a plain-JS MV3 extension. `service-worker.js` dials `ws://127.0.0.1:<port>/chrome-agent/bridge` (port from the options page, default 19387) and executes commands through `chrome.debugger` (CDP). It has **no build step**; Chrome loads `extension/` as it sits on disk.
 
 README.md explains the design rationale (why not a second profile or a debugging port) and the user-facing behaviour in detail, with one row per tool; the `name: 'chrome_…'` entries in `src/index.ts` are the authority, so keep the table in step when adding one.
 
@@ -32,7 +32,7 @@ Only the DeepSeek Harness desktop app is used (not `dsh web`). After host change
 - Hermetic (no Chrome): `test/*.test.mjs` and `test/probe-eval-contract.mjs`. These are what `npm test` runs.
 - Live: `test/live-extension.mjs [port]` and most `test/probe-*.mjs` start a stand-in bridge server on port 3099 and need a real Chrome with the extension loaded unpacked and its options-page port set to 3099 (set it back afterwards). The probes are kept as debugging evidence for specific past bugs; they are not a suite. `probe-background-input.mjs` and `probe-capture-variants.mjs` also need a throwaway raw-CDP `probe` command added to `COMMANDS` (described in their headers), which must not be committed.
 - `test/probe-worker.mjs <repoRoot>` validates the manifest key and loads the service worker against a stubbed `chrome` global.
-- On the maintainer's machine the DSH web server runs on port **19387**, and the extension's options-page port stays at 19387; don't ask for it to be changed. Run live tests on 19387 while the DSH server is stopped (`node test/live-extension.mjs 19387`). The other probes hardcode 3099 and need their `PORT` edited to match.
+- The bridge and the extension's options-page port are both **19387**; don't ask for it to be changed. A running DeepSeek Harness app holds that port, so close the app before running live tests on it (`node test/live-extension.mjs 19387`) or `test/reload-extension.mjs 19387`. The other probes hardcode 3099 and need their `PORT` edited to match.
 
 ## Architecture and cross-file invariants
 

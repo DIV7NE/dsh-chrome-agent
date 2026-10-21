@@ -6,12 +6,16 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { once } from 'node:events'
+import { WebSocket } from 'ws'
 import {
   BATCHABLE_TOOLS,
+  Bridge,
   deriveExtensionId,
   EXTENSION_ID,
   EXTENSION_KEY,
   isTrustedBridgeRequest,
+  listenBridge,
   resolveBatchStep,
   summarizeBatchValue,
 } from '../lib/index.js'
@@ -98,4 +102,44 @@ test('a batch result is a bounded string', () => {
   const long = summarizeBatchValue('x'.repeat(9000))
   assert.ok(long.length < 4100, 'long output must be capped, got ' + long.length)
   assert.match(long, /truncated/)
+})
+
+test('the bridge listener upgrades only the pinned Origin, and reports a busy port', async () => {
+  const bridge = new Bridge()
+  const wss = listenBridge(bridge, 0)
+  await once(wss, 'listening')
+  const port = wss.address().port
+  const url = 'ws://127.0.0.1:' + port + '/chrome-agent/bridge'
+  const refused = async headers => {
+    const ws = new WebSocket(url, { headers })
+    ws.on('error', () => {})
+    const status = await Promise.race([
+      once(ws, 'unexpected-response').then(([, res]) => res.statusCode),
+      once(ws, 'open').then(() => 101),
+    ])
+    ws.terminate()
+    return status
+  }
+  try {
+    assert.equal(await refused({}), 403)
+    assert.equal(await refused({ origin: 'https://evil.example' }), 403)
+    assert.equal(await refused({ origin: 'chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn' }), 403)
+
+    const ws = new WebSocket(url, { headers: { origin: 'chrome-extension://' + EXTENSION_ID } })
+    await once(ws, 'open')
+    for (let i = 0; i < 50 && !bridge.connected(); i++) await new Promise(r => setTimeout(r, 10))
+    assert.equal(bridge.connected(), true)
+    ws.terminate()
+
+    const second = new Bridge()
+    const clash = listenBridge(second, port)
+    await once(clash, 'error')
+    assert.match(second.listenError, /could not listen on 127\.0\.0\.1:\d+/)
+    await assert.rejects(second.call('tabs'), /not listening/)
+    clash.close()
+  } finally {
+    bridge.dispose()
+    for (const client of wss.clients) client.terminate()
+    wss.close()
+  }
 })
