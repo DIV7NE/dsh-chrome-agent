@@ -26,6 +26,7 @@ const {
   framePointToViewport,
   keyCodeFor,
   parseKeySequence,
+  modifierMask,
 } = globalThis.DSH_PURE
 
 /** A frame tree node shaped like Page.getFrameTree's. A leaf omits childFrames. */
@@ -240,4 +241,23 @@ test('a key sequence refuses nonsense rather than guessing', () => {
   assert.deepEqual(parseKeySequence('a', 2.7), ['a', 'a'])
   assert.equal(parseKeySequence('a', 1000).length, 100)
   assert.deepEqual(parseKeySequence('a', 'lots'), ['a'])
+})
+
+test('click modifiers parse to the CDP bitmask, with the usual aliases', () => {
+  assert.equal(modifierMask(undefined), 0)
+  assert.equal(modifierMask(''), 0)
+  assert.equal(modifierMask('Alt'), 1)
+  assert.equal(modifierMask('Control'), 2)
+  assert.equal(modifierMask('ctrl'), 2)
+  assert.equal(modifierMask('Meta'), 4)
+  assert.equal(modifierMask('cmd'), 4)
+  assert.equal(modifierMask('Shift'), 8)
+  assert.equal(modifierMask('Control+Shift'), 10)
+  assert.equal(modifierMask(' shift + ALT '), 9)
+})
+
+test('an unknown modifier is refused, not ignored', () => {
+  assert.equal(modifierMask('Hyper'), null)
+  assert.equal(modifierMask('Control+x'), null)
+  assert.equal(modifierMask(7), null)
 })

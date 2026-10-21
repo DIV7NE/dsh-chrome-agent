@@ -486,6 +486,14 @@ try {
   const afterRight = await call('eval', { tabId: cap.tabId, expression: 'window.__ev' });
   check('a right click reaches button 2', String(afterRight.result).indexOf('contextmenu:2') !== -1, afterRight);
 
+  await call('eval', { tabId: cap.tabId, expression: '(function () { window.__held = null; document.getElementById("b").addEventListener("click", function (e) { window.__held = (e.ctrlKey ? "ctrl " : "") + (e.shiftKey ? "shift " : "") + (e.altKey ? "alt " : "") + (e.metaKey ? "meta" : ""); }, { once: true }); return "ok"; })()' });
+  const heldClick = await call('click', { selector: '#b', modifiers: 'Control+Shift', tabId: cap.tabId });
+  const held = await call('eval', { tabId: cap.tabId, expression: 'window.__held' });
+  check('a click with modifiers holds them', JSON.parse(held.result) === 'ctrl shift ', { held, heldClick });
+  let badModifier = null;
+  try { await call('click', { selector: '#b', modifiers: 'Hyper', tabId: cap.tabId }); } catch (error) { badModifier = String(error.message); }
+  check('an unknown modifier is refused', badModifier !== null && /unknown modifier/.test(badModifier), badModifier);
+
   await call('drag', { fromSelector: '#box', toSelector: '#f', tabId: cap.tabId });
   const ev = JSON.parse(String((await call('eval', { tabId: cap.tabId, expression: 'window.__ev' })).result));
   const startAt = ev.indexOf('mousedown:0:1');

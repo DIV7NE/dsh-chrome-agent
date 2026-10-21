@@ -27,6 +27,7 @@ const sumFrameOffsets = PURE.sumFrameOffsets;
 const framePointToViewport = PURE.framePointToViewport;
 const keyCodeFor = PURE.keyCodeFor;
 const parseKeySequence = PURE.parseKeySequence;
+const modifierMask = PURE.modifierMask;
 
 const DEFAULT_PORT = 3080;
 const PROTOCOL_VERSION = 1;
@@ -1940,6 +1941,10 @@ const COMMANDS = {
 
   async click(params) {
     const tabId = await resolveTabId(params.tabId);
+    const modifiers = modifierMask(params.modifiers);
+    if (modifiers === null) {
+      throw new Error('unknown modifier in ' + JSON.stringify(params.modifiers) + ' — use Control, Shift, Alt or Meta, joined by "+"');
+    }
     await ensureInputReady(tabId);
     const placed = await resolveVisiblePoint(tabId, params, '');
     if (!placed) throw new Error('click target not found — take a fresh chrome_snapshot and use its ref');
@@ -1955,14 +1960,17 @@ const COMMANDS = {
     // The pressed-buttons mask is a bitfield: 1 left, 2 right, 4 middle.
     const held = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
     const clicks = params.clicks === 3 ? 3 : params.clicks === 2 ? 2 : 1;
-    const at = { x: x, y: y, modifiers: 0, button: button };
+    const at = { x: x, y: y, modifiers: modifiers, button: button };
     await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved', buttons: 0, force: 0 }, at, { button: 'none' }));
     for (let count = 1; count <= clicks; count += 1) {
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: held, clickCount: count, force: 0.5 }, at));
       await cdp(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseReleased', buttons: 0, clickCount: count, force: 0 }, at));
     }
     await paintCursor(tabId, x, y);
-    return { clicked: label + (button === 'left' && clicks === 1 ? '' : ' [' + button + ' x' + clicks + ']') };
+    const how = [];
+    if (button !== 'left' || clicks !== 1) how.push(button + ' x' + clicks);
+    if (modifiers !== 0) how.push('with ' + params.modifiers);
+    return { clicked: label + (how.length === 0 ? '' : ' [' + how.join(', ') + ']') };
   },
 
   async hover(params) {

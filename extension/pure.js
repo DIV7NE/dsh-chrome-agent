@@ -249,6 +249,31 @@
     return out;
   }
 
+  /** CDP's modifier bits, with the names people use for each key. */
+  var MODIFIER_BITS = { alt: 1, option: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, win: 4, shift: 8 };
+
+  /**
+   * A click's held keys, e.g. "Control+Shift", as CDP's modifier bitmask.
+   *
+   * @param text - modifier names joined by "+", case-insensitive; empty or
+   *   absent for none.
+   * @returns the bitmask, or null when a name is not a modifier, so a typo is
+   *   refused rather than silently clicking without the key.
+   */
+  function modifierMask(text) {
+    if (text === undefined || text === null || text === '') return 0;
+    if (typeof text !== 'string') return null;
+    var mask = 0;
+    var parts = text.split('+');
+    for (var i = 0; i < parts.length; i += 1) {
+      var name = parts[i].trim().toLowerCase();
+      if (name === '') continue;
+      if (!Object.prototype.hasOwnProperty.call(MODIFIER_BITS, name)) return null;
+      mask |= MODIFIER_BITS[name];
+    }
+    return mask;
+  }
+
   root.DSH_PURE = {
     FRAME_LIMIT: FRAME_LIMIT,
     SCREENSHOT_BASE64_LIMIT: SCREENSHOT_BASE64_LIMIT,
@@ -263,5 +288,6 @@
     framePointToViewport: framePointToViewport,
     keyCodeFor: keyCodeFor,
     parseKeySequence: parseKeySequence,
+    modifierMask: modifierMask,
   };
 })(typeof self !== 'undefined' ? self : globalThis);

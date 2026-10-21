@@ -503,6 +503,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y: { type: 'integer', description: 'Viewport y, with x, for a coordinate click.' },
       button: { type: 'string', description: 'Which button: left (default), right, or middle.' },
       clicks: { type: 'integer', description: '1 (default), 2 for a double click, or 3 for a triple click.' },
+      modifiers: { type: 'string', description: 'Keys held during the click, joined by "+": Control, Shift, Alt, Meta (e.g. "Control" to open a link in a new tab, "Shift" to extend a selection).' },
       frame: {
         type: 'string',
         description: 'Frame the ref belongs to, as chrome_snapshot writes it (e.g. "f1"). Omit for the main page.',
@@ -530,6 +531,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       y?: number
       button?: string
       clicks?: number
+      modifiers?: string
       frame?: string
       tabId?: number
       dialog?: string
