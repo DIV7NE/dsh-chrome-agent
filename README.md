@@ -31,18 +31,21 @@ does not work, and the reason is worth stating because it is not a bug:
 ```sh
 cd <this directory>
 npm install
-npm run install:profile          # builds, packs, installs into the web profile
+npm run pack:plugin              # builds and packs dsh-chrome-agent-<version>.tgz
 ```
 
-**Restart the DSH server** (`dsh web`) — the profile's bundle stack is composed
-at boot, so a new plugin cannot appear in a running server. Reload the page.
+Install (or update) `dsh-chrome-agent` from that tarball in **DeepSeek Harness**,
+then **restart the app** — its bundle stack is composed at boot, so a new or
+updated plugin cannot appear in a running app. The app manages its profile
+itself, so the `dsh` CLI cannot install into it.
 
 ### 2. The companion extension
 
 1. Open `chrome://extensions`
 2. Turn on **Developer mode** (top right)
 3. **Load unpacked** → select this package's `extension/` folder
-4. Open the extension's **Options** and check the DSH web port (default `3080`)
+4. Open the extension's **Options** and set the port DeepSeek Harness's local
+   server listens on (the extension's default is `3080`)
 
 Chrome shows *"DSH Chrome Agent started debugging this browser"* while the agent
 holds an attachment. That banner is Chrome's, and it is the honest signal that

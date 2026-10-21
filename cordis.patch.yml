@@ -1,8 +1,7 @@
 # dsh-chrome-agent bundle patch
 #
-# Installed through the official CLI:
-#
-#   dsh plugin --profile web add <this package>
+# Installed through the DeepSeek Harness app, from the tarball `npm run
+# pack:plugin` builds; the app manages its profile itself.
 #
 # The plugin claims the /chrome-agent/bridge WebSocket route. Nothing else is
 # required from the profile: the companion Chrome extension is loaded by hand

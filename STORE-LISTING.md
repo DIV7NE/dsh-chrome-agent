@@ -123,20 +123,20 @@ reviewer needs the server running. Paste this into "Test instructions":
 
 ```
 This extension is a client half. It dials a WebSocket to a local server (the
-open-source DeepSeek Harness, "DSH") on 127.0.0.1:3080. It cannot function
+open-source DeepSeek Harness, "DSH") on 127.0.0.1, at the port set on its
+options page (3080 by default). It cannot function
 without that local server, and it has no developer-run backend.
 
 To verify it works end to end:
 
-1. Install the companion DSH plugin from the open-source repository
-   (npm package "dsh-chrome-agent"):
-       npm install dsh-chrome-agent
-       node scripts/install-profile.mjs
-   Then start the server:  dsh web
-   It listens on http://127.0.0.1:3080.
-2. Load this extension. Open its Options page and confirm the port is 3080.
-   The options page should report "Connected to 127.0.0.1:3080".
-3. In the DSH web UI, ask the agent to run the tool named chrome_status.
+1. Install the companion DSH plugin from the open-source repository:
+       npm install
+       npm run pack:plugin
+   Then install the packed dsh-chrome-agent tarball in the DeepSeek Harness
+   app and restart it.
+2. Load this extension. Open its Options page and set the port to the one the
+   DeepSeek Harness app's local server listens on.
+3. In DeepSeek Harness, ask the agent to run the tool named chrome_status.
    It should report the extension connected, with the same extension id shown
    on the Options page.
 4. Ask it to run chrome_open with url "https://example.com", then

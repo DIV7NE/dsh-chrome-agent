@@ -19,13 +19,13 @@ npm run typecheck    # tsc --noEmit over src/ and scripts/
 npm test             # builds first (pretest), then node --test test/*.test.mjs + test/probe-eval-contract.mjs
 node --test test/pure.test.mjs                          # one test file
 node --test --test-name-pattern "<regex>" test/pure.test.mjs   # one test
-npm run install:profile [profile]   # build, npm pack, `dsh plugin --profile <web> add` the tarball
+npm run pack:plugin                 # build and npm pack the tarball DeepSeek Harness installs from
 npm run pack:webstore               # zip extension/ into dsh-chrome-agent-webstore.zip
 ```
 
 `test/bridge.test.mjs` imports `../lib/index.js`, so run `npm run build` before running it directly. The `*.tgz` and `*.zip` files in the root are build outputs (gitignored).
 
-After host changes, `npm run install:profile` and then **restart the DSH server** (the bundle stack is composed at boot). After extension changes, run `node test/reload-extension.mjs 19387` (DSH stopped): the running worker reloads itself from disk through its `reloadExtension` command and the script waits for the new worker's hello. Only a worker that predates that command needs **Reload** in `chrome://extensions`. `--load-extension` no longer works, so nothing can launch a Chrome with the extension for you.
+Only the DeepSeek Harness desktop app is used (not `dsh web`). After host changes, `npm run pack:plugin`, then update the plugin from that tarball in the app and **restart the app** (the bundle stack is composed at boot). The app manages its `desktop` profile exclusively, so `dsh plugin --profile desktop` is refused. After extension changes, run `node test/reload-extension.mjs 19387` (DSH stopped): the running worker reloads itself from disk through its `reloadExtension` command and the script waits for the new worker's hello. Only a worker that predates that command needs **Reload** in `chrome://extensions`. `--load-extension` no longer works, so nothing can launch a Chrome with the extension for you.
 
 ### Hermetic vs live tests
 
