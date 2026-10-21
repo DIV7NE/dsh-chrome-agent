@@ -623,7 +623,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
     name: 'chrome_eval',
     description:
       'Evaluate a JavaScript expression in the page and return its value. Returns a serialized value '
-      + '(JSON, or a description for host objects). Use it to read data the snapshot does not surface.',
+      + '(JSON, or a description for host objects). A promise is awaited, and the expression may use await '
+      + '(e.g. (await fetch("/api/me")).status). Use it to read data the snapshot does not surface. '
+      + 'Do not use it to click or type (el.click(), el.value = …): those are untrusted script events that many pages ignore, '
+      + 'and they skip the checks chrome_click and chrome_type make; use those tools instead.',
     parameters: {
       expression: { type: 'string', required: true, description: 'A JavaScript expression. Wrap multi-statement work in an IIFE.' },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },

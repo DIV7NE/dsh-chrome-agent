@@ -2250,9 +2250,9 @@ const COMMANDS = {
     const expression = typeof params.expression === 'string' ? params.expression : '';
     if (expression === '') throw new Error('chrome_eval needs an expression');
     const wrapped = [
-      '(function () {',
+      '(async function () {',
       '  try {',
-      '    var value = (' + expression + ');',
+      '    var value = await (' + expression + ');',
       '    if (value === undefined) return "undefined";',
       '    return JSON.stringify(value);',
       '  } catch (error) { return "Error: " + (error && error.message); }',

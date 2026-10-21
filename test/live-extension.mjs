@@ -173,6 +173,11 @@ try {
 
   const circular = await call('eval', { expression: '(function () { var o = {}; o.self = o; return o; })()', tabId: opened.tabId });
   check('a circular value is reported, not thrown', /Error/i.test(String(circular.result)), circular);
+  // The wrapper used to serialise a Promise before it settled, so this read "{}".
+  const later = await call('eval', { expression: 'new Promise(function (r) { setTimeout(function () { r({ answer: 42 }); }, 50); })', tabId: opened.tabId });
+  check('a promise is awaited before its value comes back', String(later.result) === '{"answer":42}', later);
+  const awaited = await call('eval', { expression: '(await Promise.resolve(6)) * 7', tabId: opened.tabId });
+  check('an expression can use await', String(awaited.result) === '42', awaited);
 
   await call('type', { selector: '#q', text: 'by selector', tabId: form.tabId });
   const bySelector = await call('eval', { expression: 'document.activeElement.value', tabId: form.tabId });
