@@ -25,6 +25,8 @@ const isTabAllowed = PURE.isTabAllowed;
 const pointInViewport = PURE.pointInViewport;
 const sumFrameOffsets = PURE.sumFrameOffsets;
 const framePointToViewport = PURE.framePointToViewport;
+const keyCodeFor = PURE.keyCodeFor;
+const parseKeySequence = PURE.parseKeySequence;
 
 const DEFAULT_PORT = 3080;
 const PROTOCOL_VERSION = 1;
@@ -1351,15 +1353,17 @@ function keyDescriptor(chord) {
     };
   }
   if (name.length === 1) {
-    const upper = name.toUpperCase();
+    // A character no US key produces still types; it just has no physical code.
+    const physical = keyCodeFor(name) || { code: '', windowsVirtualKeyCode: 0, shift: false };
     const editing = (mask & (MODIFIERS.control | MODIFIERS.meta)) !== 0
       ? EDIT_COMMANDS[name.toLowerCase()]
       : undefined;
     return {
       key: name,
-      code: 'Key' + upper,
-      windowsVirtualKeyCode: upper.charCodeAt(0),
-      modifiers: mask,
+      code: physical.code,
+      windowsVirtualKeyCode: physical.windowsVirtualKeyCode,
+      // A shifted character holds shift as a real keyboard does, and still types it.
+      modifiers: mask | (physical.shift ? MODIFIERS.shift : 0),
       text: mask === 0 ? name : '',
       commands: editing === undefined ? [] : [editing],
     };
@@ -1780,6 +1784,30 @@ async function typeWithInput(params) {
     matches = !!after && after.length >= text.length;
   }
   return { typed: text !== '', submitted: submit, value: value, matches: matches };
+}
+
+/** Press and release one key, as described by keyDescriptor. */
+async function pressKey(tabId, descriptor) {
+  const shared = {
+    key: descriptor.key,
+    code: descriptor.code,
+    windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+    modifiers: descriptor.modifiers,
+    location: 0,
+    isKeypad: false,
+  };
+  // rawKeyDown for a key that produces no text; keyDown otherwise. Chrome
+  // treats the two differently and a raw event is what a shortcut is.
+  const down = Object.assign({}, shared, { type: descriptor.text === '' ? 'rawKeyDown' : 'keyDown' });
+  // text and commands are mutually exclusive in the protocol.
+  if (descriptor.text !== '') {
+    down.text = descriptor.text;
+    down.unmodifiedText = descriptor.text;
+  } else if (descriptor.commands.length > 0) {
+    down.commands = descriptor.commands;
+  }
+  await cdp(tabId, 'Input.dispatchKeyEvent', down);
+  await cdp(tabId, 'Input.dispatchKeyEvent', Object.assign({}, shared, { type: 'keyUp' }));
 }
 
 const COMMANDS = {
@@ -2219,31 +2247,17 @@ const COMMANDS = {
 
   async key(params) {
     const tabId = await resolveTabId(params.tabId);
+    const chords = parseKeySequence(params.key, params.repeat);
+    if (chords.length === 0) throw new Error('chrome_key needs a key, e.g. "Enter" or "Tab Tab Enter"');
+    // Every chord is parsed before any is pressed, so a typo cannot leave a
+    // sequence half done.
+    const descriptors = chords.map(keyDescriptor);
     // Keys are dropped on an unrendered tab exactly like mouse input.
     await ensureInputReady(tabId);
-    const descriptor = keyDescriptor(params.key);
-    const shared = {
-      key: descriptor.key,
-      code: descriptor.code,
-      windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-      modifiers: descriptor.modifiers,
-      location: 0,
-      isKeypad: false,
-    };
-    // rawKeyDown for a key that produces no text; keyDown otherwise. Chrome
-    // treats the two differently and a raw event is what a shortcut is.
-    const down = Object.assign({}, shared, { type: descriptor.text === '' ? 'rawKeyDown' : 'keyDown' });
-    // text and commands are mutually exclusive in the protocol.
-    if (descriptor.text !== '') {
-      down.text = descriptor.text;
-      down.unmodifiedText = descriptor.text;
-    } else if (descriptor.commands.length > 0) {
-      down.commands = descriptor.commands;
-    }
-    await cdp(tabId, 'Input.dispatchKeyEvent', down);
-    await cdp(tabId, 'Input.dispatchKeyEvent', Object.assign({}, shared, { type: 'keyUp' }));
-    return { pressed: String(params.key) };
+    for (const descriptor of descriptors) await pressKey(tabId, descriptor);
+    return { pressed: chords.length === 1 ? chords[0] : chords.join(' ') + ' (' + chords.length + ' presses)' };
   },
+
 
   async eval(params) {
     const tabId = await resolveTabId(params.tabId);

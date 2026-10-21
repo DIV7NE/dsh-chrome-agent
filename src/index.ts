@@ -599,11 +599,13 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
   register(defineTool({
     name: 'chrome_key',
     description:
-      'Press a single key or chord on the page, e.g. "Enter", "Escape", "PageDown", "Control+a". '
+      'Press a key or chord on the page, e.g. "Enter", "Escape", "PageDown", "Control+a" — or several in order, '
+      + 'separated by spaces ("Tab Tab Enter"), and `repeat` to press the whole sequence again (ArrowDown ×5). '
       + 'Use chrome_type for text and this for navigation and shortcuts. '
       + 'Works on a background tab without moving the user\'s view.',
     parameters: {
-      key: { type: 'string', required: true, description: 'Key or chord, e.g. "Tab", "Control+Enter".' },
+      key: { type: 'string', required: true, description: 'Key or chord, or several separated by spaces, e.g. "Tab", "Control+Enter", "Tab Tab Enter".' },
+      repeat: { type: 'integer', description: 'Press the whole sequence this many times, 1 (default) to 100.' },
       tabId: { type: 'integer', description: 'Target tab id. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
       ...DIALOG_PARAMETERS,
     },
@@ -615,7 +617,7 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       },
       render: textRender<{ pressed: string; dialogs?: DialogReport[] }>(v => 'Pressed ' + v.pressed + '.' + dialogNote(v)),
     },
-    execute: async (args: { key: string; tabId?: number; dialog?: string; promptText?: string }) =>
+    execute: async (args: { key: string; repeat?: number; tabId?: number; dialog?: string; promptText?: string }) =>
       bridge.call<{ pressed: string }>('key', args),
   }))
 

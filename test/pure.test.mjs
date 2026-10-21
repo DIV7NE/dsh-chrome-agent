@@ -24,6 +24,8 @@ const {
   pointInViewport,
   sumFrameOffsets,
   framePointToViewport,
+  keyCodeFor,
+  parseKeySequence,
 } = globalThis.DSH_PURE
 
 /** A frame tree node shaped like Page.getFrameTree's. A leaf omits childFrames. */
@@ -198,4 +200,44 @@ test('an unreadable scroll refuses rather than guessing', () => {
   assert.equal(framePointToViewport({ x: 1, y: 2 }, { x: 3, y: 4 }, null), null)
   assert.equal(framePointToViewport({ x: NaN, y: 2 }, { x: 3, y: 4 }, { x: 0, y: 0 }), null)
   assert.equal(framePointToViewport({ x: 1, y: 2 }, { x: 3, y: 4 }, { x: 0, y: undefined }), null)
+})
+
+test('a character maps to the physical key a US keyboard presses for it', () => {
+  assert.deepEqual(keyCodeFor('a'), { code: 'KeyA', windowsVirtualKeyCode: 65, shift: false })
+  assert.deepEqual(keyCodeFor('Z'), { code: 'KeyZ', windowsVirtualKeyCode: 90, shift: true })
+  // A digit is DigitN; the old code called "1" KeyA-style "Key1".
+  assert.deepEqual(keyCodeFor('1'), { code: 'Digit1', windowsVirtualKeyCode: 49, shift: false })
+  assert.deepEqual(keyCodeFor('0'), { code: 'Digit0', windowsVirtualKeyCode: 48, shift: false })
+  assert.deepEqual(keyCodeFor('.'), { code: 'Period', windowsVirtualKeyCode: 190, shift: false })
+  assert.deepEqual(keyCodeFor('/'), { code: 'Slash', windowsVirtualKeyCode: 191, shift: false })
+  // Shifted symbols share their key with the unshifted one.
+  assert.deepEqual(keyCodeFor('!'), { code: 'Digit1', windowsVirtualKeyCode: 49, shift: true })
+  assert.deepEqual(keyCodeFor('?'), { code: 'Slash', windowsVirtualKeyCode: 191, shift: true })
+  assert.deepEqual(keyCodeFor('_'), { code: 'Minus', windowsVirtualKeyCode: 189, shift: true })
+})
+
+test('a character with no US key, or not one character, has no code', () => {
+  assert.equal(keyCodeFor('é'), null)
+  assert.equal(keyCodeFor('ab'), null)
+  assert.equal(keyCodeFor(''), null)
+  assert.equal(keyCodeFor(undefined), null)
+})
+
+test('a key sequence splits on spaces and repeats as a whole', () => {
+  assert.deepEqual(parseKeySequence('Enter'), ['Enter'])
+  assert.deepEqual(parseKeySequence('Tab Tab Enter'), ['Tab', 'Tab', 'Enter'])
+  assert.deepEqual(parseKeySequence('  Control+a   Backspace '), ['Control+a', 'Backspace'])
+  assert.deepEqual(parseKeySequence('ArrowDown', 3), ['ArrowDown', 'ArrowDown', 'ArrowDown'])
+  assert.deepEqual(parseKeySequence('Tab Enter', 2), ['Tab', 'Enter', 'Tab', 'Enter'])
+})
+
+test('a key sequence refuses nonsense rather than guessing', () => {
+  assert.deepEqual(parseKeySequence(''), [])
+  assert.deepEqual(parseKeySequence('   '), [])
+  assert.deepEqual(parseKeySequence(undefined), [])
+  // Repeat is a whole number from 1 to 100; anything else is clamped or defaults to 1.
+  assert.deepEqual(parseKeySequence('a', 0), ['a'])
+  assert.deepEqual(parseKeySequence('a', 2.7), ['a', 'a'])
+  assert.equal(parseKeySequence('a', 1000).length, 100)
+  assert.deepEqual(parseKeySequence('a', 'lots'), ['a'])
 })

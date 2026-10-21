@@ -197,6 +197,58 @@
     return { x: point.x + offset.x - scroll.x, y: point.y + offset.y - scroll.y };
   }
 
+  /** US-layout punctuation: unshifted character, shifted character, code, virtual key. */
+  var PUNCTUATION_KEYS = [
+    ['`', '~', 'Backquote', 192], ['-', '_', 'Minus', 189], ['=', '+', 'Equal', 187],
+    ['[', '{', 'BracketLeft', 219], [']', '}', 'BracketRight', 221], ['\\', '|', 'Backslash', 220],
+    [';', ':', 'Semicolon', 186], ["'", '"', 'Quote', 222], [',', '<', 'Comma', 188],
+    ['.', '>', 'Period', 190], ['/', '?', 'Slash', 191],
+  ];
+  var SHIFTED_DIGITS = ')!@#$%^&*(';
+
+  /**
+   * The physical key a US keyboard presses for one character: its `code`, its
+   * Windows virtual key, and whether shift is held. Pages that read
+   * KeyboardEvent.code (shortcuts, games) need the real one; "1" used to be
+   * sent as "Key1", which no keyboard has.
+   *
+   * @param ch - a single character.
+   * @returns `{ code, windowsVirtualKeyCode, shift }`, or null for a character
+   *   no US key produces.
+   */
+  function keyCodeFor(ch) {
+    if (typeof ch !== 'string' || ch.length !== 1) return null;
+    if (/[a-z]/.test(ch)) return { code: 'Key' + ch.toUpperCase(), windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0), shift: false };
+    if (/[A-Z]/.test(ch)) return { code: 'Key' + ch, windowsVirtualKeyCode: ch.charCodeAt(0), shift: true };
+    if (/[0-9]/.test(ch)) return { code: 'Digit' + ch, windowsVirtualKeyCode: ch.charCodeAt(0), shift: false };
+    var shiftedDigit = SHIFTED_DIGITS.indexOf(ch);
+    if (shiftedDigit !== -1) return { code: 'Digit' + shiftedDigit, windowsVirtualKeyCode: 48 + shiftedDigit, shift: true };
+    for (var i = 0; i < PUNCTUATION_KEYS.length; i += 1) {
+      var entry = PUNCTUATION_KEYS[i];
+      if (ch === entry[0]) return { code: entry[2], windowsVirtualKeyCode: entry[3], shift: false };
+      if (ch === entry[1]) return { code: entry[2], windowsVirtualKeyCode: entry[3], shift: true };
+    }
+    return null;
+  }
+
+  /**
+   * Split a chrome_key argument into the chords to press, in order.
+   *
+   * @param text - one chord or several separated by spaces, e.g. "Tab Tab Enter".
+   * @param repeat - how many times to press the whole sequence: a whole number
+   *   from 1 to 100; anything else is clamped, or taken as 1.
+   * @returns the chords, or an empty list for no chord at all.
+   */
+  function parseKeySequence(text, repeat) {
+    if (typeof text !== 'string') return [];
+    var chords = text.split(/\s+/).filter(function (part) { return part !== ''; });
+    var times = typeof repeat === 'number' && isFinite(repeat) ? Math.floor(repeat) : 1;
+    times = Math.max(1, Math.min(100, times));
+    var out = [];
+    for (var n = 0; n < times; n += 1) out = out.concat(chords);
+    return out;
+  }
+
   root.DSH_PURE = {
     FRAME_LIMIT: FRAME_LIMIT,
     SCREENSHOT_BASE64_LIMIT: SCREENSHOT_BASE64_LIMIT,
@@ -209,5 +261,7 @@
     pointInViewport: pointInViewport,
     sumFrameOffsets: sumFrameOffsets,
     framePointToViewport: framePointToViewport,
+    keyCodeFor: keyCodeFor,
+    parseKeySequence: parseKeySequence,
   };
 })(typeof self !== 'undefined' ? self : globalThis);

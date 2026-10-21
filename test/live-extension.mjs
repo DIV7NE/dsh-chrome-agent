@@ -160,6 +160,22 @@ try {
   const pressed = await call('key', { key: 'Escape', tabId: form.tabId });
   check('key dispatches', pressed.pressed === 'Escape', pressed);
 
+  // Each keydown the page sees, as key/code/shift, on a field of its own.
+  await call('eval', { tabId: form.tabId, expression: '(function () { document.body.insertAdjacentHTML("beforeend", "<input id=\\"keys\\" data-bwignore autocomplete=\\"off\\">"); window.__keys = []; document.getElementById("keys").addEventListener("keydown", function (e) { window.__keys.push(e.key + "/" + e.code + (e.shiftKey ? "/shift" : "")); }); return "ok"; })()' });
+  const keysOf = async () => JSON.parse((await call('eval', { tabId: form.tabId, expression: 'window.__keys.splice(0)' })).result);
+  await call('click', { selector: '#keys', tabId: form.tabId });
+  await keysOf();
+  await call('key', { key: '1', tabId: form.tabId });
+  check('a digit is sent with its real key code', JSON.stringify(await keysOf()) === '["1/Digit1"]');
+  await call('key', { key: '!', tabId: form.tabId });
+  check('a shifted symbol holds shift on its own key', JSON.stringify(await keysOf()) === '["!/Digit1/shift"]');
+  const sequence = await call('key', { key: 'a b c', tabId: form.tabId });
+  check('a key sequence is pressed in order', JSON.stringify(await keysOf()) === '["a/KeyA","b/KeyB","c/KeyC"]', sequence);
+  await call('key', { key: 'ArrowLeft', repeat: 3, tabId: form.tabId });
+  check('repeat presses the sequence again', JSON.stringify(await keysOf()) === '["ArrowLeft/ArrowLeft","ArrowLeft/ArrowLeft","ArrowLeft/ArrowLeft"]');
+  const keysValue = await call('eval', { tabId: form.tabId, expression: 'document.getElementById("keys").value' });
+  check('the keys typed what they should', JSON.parse(keysValue.result) === '1!abc', keysValue);
+
   // --- edge cases -------------------------------------------------------------
   console.log('');
   console.log('edge cases');
