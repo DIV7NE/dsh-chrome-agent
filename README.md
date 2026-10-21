@@ -26,6 +26,9 @@ does not work, and the reason is worth stating because it is not a bug:
 
 ## Install
 
+[INSTALL.md](INSTALL.md) has the full procedure: setup, updating, checking and
+troubleshooting. In short:
+
 ### 1. The plugin
 
 ```sh
@@ -34,10 +37,12 @@ npm install
 npm run pack:plugin              # builds and packs dsh-chrome-agent-<version>.tgz
 ```
 
-Install (or update) `dsh-chrome-agent` from that tarball in **DeepSeek Harness**,
-then **restart the app** — its bundle stack is composed at boot, so a new or
-updated plugin cannot appear in a running app. The app manages its profile
-itself, so the `dsh` CLI cannot install into it.
+In **DeepSeek Harness**, open **Plugins**, click the arrow next to **Add plugin**,
+choose **Install a third-party plugin**, give it the tarball's full path, then
+click **Enable now**. It starts without restarting the app. To update, uninstall
+it and install it again the same way, because the app only offers Update for
+its official plugins. The app manages its profile itself, so the `dsh` CLI
+cannot install into it.
 
 ### 2. The companion extension
 

@@ -14,7 +14,8 @@
     "lib/",
     "extension/",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "INSTALL.md"
   ],
   "engines": {
     "node": ">=20"

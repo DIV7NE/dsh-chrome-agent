@@ -27,4 +27,5 @@ run('npm pack')
 const tarball = readdirSync(root).filter(name => name.endsWith('.tgz'))[0]
 if (tarball === undefined) throw new Error('npm pack produced no tarball')
 process.stdout.write('\nPacked ' + resolve(root, tarball) + '\n'
-  + 'Install or update dsh-chrome-agent from that file in DeepSeek Harness, then restart the app.\n')
+  + 'In DeepSeek Harness: Plugins, uninstall dsh-chrome-agent if present, then Add plugin > Install a third-party plugin\n'
+  + 'with that path, then Enable now. See INSTALL.md.\n')
