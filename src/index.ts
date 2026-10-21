@@ -431,9 +431,10 @@ function registerTools(ctx: HostContext, bridge: Bridge): void {
       + 'prefer that, or pass a `tabId` for a tab you already opened, so you never navigate a tab the '
       + 'user is reading. Without either, this navigates the tab the agent is working in. '
       + 'Opening a tab also makes it the tab later calls act on by default. '
+      + 'Pass "back", "forward" or "reload" as the url to move the tab through its history. '
       + 'This is the user\'s real browser, already signed in.',
     parameters: {
-      url: { type: 'string', required: true, description: 'Absolute http(s) URL to open.' },
+      url: { type: 'string', required: true, description: 'Absolute http(s) URL to open, or "back", "forward" or "reload".' },
       tabId: { type: 'integer', description: 'Target tab id from chrome_tabs. Defaults to the tab the agent is working in — the last one it opened or was given. Pass an explicit id to work on another tab.' },
       newTab: { type: 'boolean', description: 'Open a new tab instead of reusing one.' },
       ...DIALOG_PARAMETERS,

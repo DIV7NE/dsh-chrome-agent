@@ -1790,6 +1790,56 @@ async function typeWithInput(params) {
   return { typed: text !== '', submitted: submit, value: value, matches: matches };
 }
 
+/**
+ * chrome_open's "back", "forward" and "reload": move a tab through its history
+ * and wait until the page that results has loaded.
+ *
+ * waitForLoad alone is not enough here: right after the call the tab can still
+ * report the old page as complete, so this waits to see the load start first,
+ * and settles anyway after a few seconds if it never does (a page restored
+ * whole from the back-forward cache may not reload at all).
+ */
+async function moveThroughHistory(params, direction) {
+  const tabId = await resolveTabId(params.tabId);
+  await guardLeaving(tabId, params, direction === 'reload' ? 'reloaded' : 'navigated');
+  const settled = new Promise(resolve => {
+    let started = false;
+    const finish = () => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(noStart);
+      clearTimeout(noFinish);
+      resolve();
+    };
+    const listener = (changedId, info) => {
+      if (changedId !== tabId) return;
+      if (info.status === 'loading') started = true;
+      if (info.status === 'complete' && started) finish();
+    };
+    const noStart = setTimeout(() => { if (!started) finish(); }, 3000);
+    const noFinish = setTimeout(finish, 20000);
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+  if (direction === 'reload') {
+    await chrome.tabs.reload(tabId);
+  } else {
+    // CDP's history, not chrome.tabs.goBack: Chrome's back-button intervention
+    // skips entries for pages nobody interacted with, and goBack honours it —
+    // measured, back from a second page the agent had only navigated to failed
+    // with "Cannot find a next page in history". The agent must be able to
+    // return to any page it was on.
+    const history = await cdp(tabId, 'Page.getNavigationHistory', {});
+    const target = history.entries[history.currentIndex + (direction === 'back' ? -1 : 1)];
+    if (!target) {
+      throw new Error('could not go ' + direction + ' in tab ' + tabId + ': there is no '
+        + (direction === 'back' ? 'previous' : 'next') + ' page in its history');
+    }
+    await cdp(tabId, 'Page.navigateToHistoryEntry', { entryId: target.id });
+  }
+  await settled;
+  rememberTab(tabId);
+  return describeTab(tabId);
+}
+
 /** Press and release one key, as described by keyDescriptor. */
 async function pressKey(tabId, descriptor) {
   const shared = {
@@ -1834,7 +1884,8 @@ const COMMANDS = {
 
   async open(params) {
     const url = typeof params.url === 'string' ? params.url : '';
-    if (!/^https?:\/\//i.test(url)) throw new Error('chrome_open needs an absolute http(s) url');
+    if (url === 'back' || url === 'forward' || url === 'reload') return moveThroughHistory(params, url);
+    if (!/^https?:\/\//i.test(url)) throw new Error('chrome_open needs an absolute http(s) url, or "back", "forward" or "reload"');
     let tabId;
     if (params.newTab === true) {
       // Deliberately not activated. The tab still loads, and every command,

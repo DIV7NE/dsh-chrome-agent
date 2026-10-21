@@ -536,6 +536,24 @@ try {
   const attached = await call('eval', { tabId: cap.tabId, expression: 'document.getElementById("f").files.length' });
   check('upload attaches a file to the input', Number(attached.result) === 1, attached);
 
+  // Back, forward and reload move one tab through its history, and come back
+  // only when the resulting page has loaded.
+  const hist = await call('open', { url: 'https://example.com/?h=1', newTab: true });
+  let noHistory = null;
+  try { await call('open', { url: 'back', tabId: hist.tabId }); } catch (error) { noHistory = String(error.message); }
+  check('back with no history is refused with Chrome\'s reason', noHistory !== null && /could not go back/.test(noHistory), noHistory);
+  await call('open', { url: 'https://example.com/?h=2', tabId: hist.tabId });
+  const wentBack = await call('open', { url: 'back', tabId: hist.tabId });
+  const backHere = await call('eval', { tabId: hist.tabId, expression: 'location.search' });
+  check('back returns to the previous page', /\?h=1$/.test(String(wentBack.url)) && JSON.parse(backHere.result) === '?h=1', { wentBack, backHere });
+  const wentForward = await call('open', { url: 'forward', tabId: hist.tabId });
+  check('forward returns to the next page', /\?h=2$/.test(String(wentForward.url)), wentForward);
+  await call('eval', { tabId: hist.tabId, expression: '(function () { window.__beforeReload = true; return "ok"; })()' });
+  await call('open', { url: 'reload', tabId: hist.tabId });
+  const reloaded = await call('eval', { tabId: hist.tabId, expression: 'window.__beforeReload === true ? "same page" : "fresh page"' });
+  check('reload loads the page again', JSON.parse(reloaded.result) === 'fresh page', reloaded);
+  await call('close', { tabId: hist.tabId });
+
   // A snapshot lists 400 refs per frame; it used to stop there without saying so.
   const many = await call('open', { url: 'https://example.com/?many', newTab: true });
   await call('eval', { tabId: many.tabId, expression: '(function () { var html = ""; for (var i = 1; i <= 450; i++) html += "<button>b" + i + "</button>"; document.body.innerHTML = html; return "ok"; })()' });
