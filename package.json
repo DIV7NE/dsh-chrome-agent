@@ -1,6 +1,6 @@
 {
   "name": "dsh-chrome-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH plugin: drive your real, logged-in Chrome through a pinned companion extension (chrome.debugger / CDP) instead of a separate browser profile.",
   "type": "module",
   "main": "lib/index.js",

@@ -40,7 +40,7 @@ npm install
 npm run pack:plugin
 ```
 
-This builds `lib/index.js` and writes `dsh-chrome-agent-0.1.0.tgz` in the
+This builds `lib/index.js` and writes `dsh-chrome-agent-0.2.0.tgz` in the
 repository root. That file is what the app installs.
 
 ## 2. Load the extension in Chrome
@@ -61,7 +61,7 @@ plugin is running.
 1. In the app's sidebar, click **Plugins**.
 2. Click the arrow next to **Add plugin**, then **Install a third-party plugin**.
 3. Enter the full path to the tarball, for example
-   `D:\projects\dsh-chrome-agent\dsh-chrome-agent-0.1.0.tgz`, then click **Install**.
+   `D:\projects\dsh-chrome-agent\dsh-chrome-agent-0.2.0.tgz`, then click **Install**.
 4. When it says **Installed**, click **Enable now**.
 
 The plugin starts straight away, and the app does not need a restart. Its
@@ -82,7 +82,7 @@ start a new session in the app and send:
 
 Expected results:
 
-- `chrome_status` reports `Chrome extension connected (version 0.1.0, id ffndjnofnffflcljofbpplcpjnknikpe)`.
+- `chrome_status` reports `Chrome extension connected (version 0.2.0, id ffndjnofnffflcljofbpplcpjnknikpe)`.
 - `chrome_open` opens example.com in a background tab in the "DSH Chrome Agent" group. Your current tab stays in front.
 - `chrome_snapshot` returns the page tree with one link, `[ref=1] a "Learn more"`.
 - `chrome_close` closes that tab.
